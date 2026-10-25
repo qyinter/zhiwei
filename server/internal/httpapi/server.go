@@ -48,7 +48,9 @@ func (s *Server) Handler() http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), s.accessLog)
-	_ = r.SetTrustedProxies([]string{"127.0.0.1", "::1"})
+	// 请求都经 Next 转发（同机或同一 Docker 网络），信任内网地址的 X-Forwarded-For 才能拿到真实客户端 IP；
+	// 只信任本机时，容器部署下所有人都显示成 web 容器的 IP，登录限流会变成全站共用一个计数。
+	_ = r.SetTrustedProxies([]string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"})
 
 	r.GET("/api/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	r.Any("/webhook/:channel", func(c *gin.Context) {

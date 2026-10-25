@@ -128,11 +128,16 @@ func (s *Server) login(c *gin.Context) {
 		return
 	}
 	u, err := s.st.AdminByUsername(c, strings.TrimSpace(req.Username))
-	if err == nil {
+	switch {
+	case err == nil:
 		err = bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password))
-	} else {
+	case errors.Is(err, store.ErrNotFound):
 		// 用户不存在也做一次等价耗时的比较，避免按响应时间枚举用户名
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(req.Password))
+	default:
+		// 数据库故障不算登录失败：否则库挂着时管理员重试几次就被锁 15 分钟
+		internal(c, err)
+		return
 	}
 	s.limiter.record(ip, err == nil)
 	if err != nil {
