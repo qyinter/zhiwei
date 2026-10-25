@@ -1,13 +1,23 @@
-# 本地开发 / 单机部署用的依赖服务。知微只依赖原生 PG（不需要任何扩展）。
+# 知微一键部署：docker compose up -d，然后打开 http://服务器:3000 走初始化向导
+# （初始化口令看 docker compose logs server 里的 setupCode=）。
+#
+# 本地开发只想要数据库：docker compose up -d postgres
+# 镜像由 GitHub Actions 构建（.github/workflows/docker.yml），固定版本可把 latest 换成 1.2.3 这类标签。
+#
+# 只能单实例：Telegram 同一个 token 只允许一个轮询者，会话队列也在进程内存里。
+name: zhiwei
+
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: zhiwei
-      POSTGRES_PASSWORD: zhiwei
+      # 改密码要在首次启动前改；库已初始化后再改这里不会生效
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zhiwei}
       POSTGRES_DB: zhiwei
     ports:
+      # 只给本机开发用（go run 直连）；容器之间走服务名，不经过这个端口
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -16,14 +26,35 @@ services:
       interval: 5s
       retries: 10
 
+  # Go 服务：不对外暴露端口，web 通过服务名 server:8080 转发 /api 和 /webhook
+  server:
+    image: ghcr.io/qyinter/zhiwei-server:latest
+    restart: unless-stopped
+    environment:
+      ZHIWEI_DB_DSN: postgres://zhiwei:${POSTGRES_PASSWORD:-zhiwei}@postgres:5432/zhiwei?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 管理后台：唯一对外的端口。建议前面再套 Nginx / Caddy 提供 HTTPS
+  web:
+    image: ghcr.io/qyinter/zhiwei-web:latest
+    restart: unless-stopped
+    ports:
+      - "${ZHIWEI_PORT:-3000}:3000"
+    depends_on:
+      - server
+
   # 向量检索用的嵌入服务（可选）：HuggingFace text-embeddings-inference + BAAI/bge-small-zh-v1.5，
   # 提供 OpenAI 兼容的 /v1/embeddings。常驻内存约 200MB，单条约 20ms。
-  # 启动后到后台「系统设置 → 向量检索」开启；不起这个服务时检索自动退回纯关键词。
+  # 默认不启动，需要时 docker compose up -d embed，再到后台「系统设置 → 向量检索」开启：
+  #   知微跑在容器里时地址填 http://embed/v1；go run 本地开发时填 http://127.0.0.1:8081/v1。
   # 镜像按 CPU 架构二选一：x86_64 服务器用缺省值；Apple Silicon / ARM 服务器设
   #   TEI_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest
   # 首次启动会下载模型（约 100MB）到 tei 卷；国内网络可设 HF_ENDPOINT=https://hf-mirror.com。
   embed:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.8}
+    profiles: [embed]
     restart: unless-stopped
     command: ["--model-id", "BAAI/bge-small-zh-v1.5", "--auto-truncate"]
     environment:

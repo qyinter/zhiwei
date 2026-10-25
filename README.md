@@ -10,6 +10,7 @@
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](server/go.mod)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](web/package.json)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-无需扩展-4169E1?logo=postgresql&logoColor=white)](docker-compose.yml)
+[![Docker](https://github.com/qyinter/zhiwei/actions/workflows/docker.yml/badge.svg)](https://github.com/qyinter/zhiwei/actions/workflows/docker.yml)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 [功能](#功能) · [快速开始](#快速开始) · [渠道配置](#渠道配置) · [部署](#生产部署) · [架构](#架构) · [文档](#文档)
@@ -77,7 +78,7 @@
 
 ## 快速开始
 
-需要 Go 1.25+、Node.js 20+（pnpm）、Docker。
+只想部署的话直接看 [Docker Compose](#docker-compose推荐)。本地开发需要 Go 1.25+、Node.js 20+（pnpm）、Docker。
 
 ```bash
 git clone https://github.com/qyinter/zhiwei.git && cd zhiwei
@@ -107,7 +108,7 @@ pnpm dev
 | 5 | 接入渠道（可跳过，之后在后台配置） |
 
 > [!TIP]
-> **想要语义检索？** 再起一个嵌入服务，然后到「系统设置 → 向量检索」开启：
+> **想要语义检索？** 再起一个嵌入服务，然后到「系统设置 → 向量检索」开启，地址填 `http://127.0.0.1:8081/v1`：
 > ```bash
 > # Apple Silicon / ARM 先 export TEI_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest
 > docker compose up -d embed
@@ -126,6 +127,29 @@ pnpm dev
 
 ## 生产部署
 
+### Docker Compose（推荐）
+
+镜像由 GitHub Actions 自动构建，支持 amd64 / arm64：
+
+| 镜像 | 内容 |
+| --- | --- |
+| `ghcr.io/qyinter/zhiwei-server` | Go 服务 |
+| `ghcr.io/qyinter/zhiwei-web` | 管理后台 |
+
+```bash
+curl -O https://raw.githubusercontent.com/qyinter/zhiwei/main/docker-compose.yml
+POSTGRES_PASSWORD='换一个强密码' docker compose up -d
+docker compose logs server | grep setupCode   # 初始化口令
+```
+
+打开 `http://服务器:3000` 进入初始化向导。可以用 `.env` 文件固定这些变量：`POSTGRES_PASSWORD`（首次启动前设置）、`ZHIWEI_PORT`（对外端口，缺省 3000）。
+
+- **版本**：`latest` 跟随 main 分支；发布 `v1.2.3` 标签后可以把镜像标签固定为 `1.2.3` 或 `1.2`。
+- **语义检索**：`docker compose up -d embed`，然后在「系统设置 → 向量检索」把地址填成 `http://embed/v1`。
+- **HTTPS**：建议前面放 Nginx 或 Caddy；识别到 HTTPS 时会话 cookie 自动带上 `Secure`。
+
+### 从源码运行
+
 ```bash
 # 后端
 cd server && go build -o bin/zhiwei ./cmd/zhiwei
@@ -135,9 +159,7 @@ ZHIWEI_DB_DSN='postgres://…' ./bin/zhiwei
 cd web && pnpm install && pnpm build && pnpm start
 ```
 
-- **只暴露 Next。** Go 服务默认只监听 `127.0.0.1:8080`（可用 `ZHIWEI_HTTP_ADDR` 修改），Next（默认 3000 端口）通过 rewrites 把 `/api/*` 和 `/webhook/*` 转给它。后端不在本机时设置 `ZHIWEI_API_ORIGIN`。
-- **加 HTTPS。** 建议前面放 Nginx 或 Caddy；识别到 HTTPS 时会话 cookie 自动带上 `Secure`。
-- **嵌入服务**只监听本机 8081；知微也跑在容器里时，把设置里的地址改成 `http://embed/v1`。
+Go 服务默认只监听 `127.0.0.1:8080`（可用 `ZHIWEI_HTTP_ADDR` 修改），Next（默认 3000 端口）通过 rewrites 把 `/api/*` 和 `/webhook/*` 转给它。后端不在本机时，在 **`pnpm build` 之前**设置 `ZHIWEI_API_ORIGIN`：这个地址在构建时写进产物，运行时再改无效。
 
 > [!IMPORTANT]
 > **只能单实例运行。** Telegram 同一个 Token 只允许一个轮询者，会话队列也放在进程内存里。

@@ -8,11 +8,12 @@
 - 后端：`cd server && ZHIWEI_DB_DSN=… go run ./cmd/zhiwei`；检查 `go vet ./... && go test ./...`
 - 数据库测试（store / kb 混合检索 / agent 流程）：`ZHIWEI_TEST_DSN=…/zhiwei_test go test -p 1 ./...`。会 DROP 测试库的 public schema，**绝不能指向正式库**；`-p 1` 必须带，几个包共用同一个测试库。改了 SQL 必须跑
 - 前端：`cd web && pnpm dev`；检查 `pnpm exec tsc --noEmit && pnpm lint && pnpm build`
+- 镜像：`server/Dockerfile`、`web/Dockerfile`，由 `.github/workflows/docker.yml` 推到 `ghcr.io/qyinter/zhiwei-{server,web}`；`docker-compose.yml` 直接引用这两个镜像（`embed` 在 profile 里，需显式启动）
 - 声称完成前两端检查都要跑。
 
 ## 关键约定
 
-- **env 只有 `ZHIWEI_DB_DSN`（+ 可选 `ZHIWEI_HTTP_ADDR` / web 的 `ZHIWEI_API_ORIGIN`）。** 新配置项一律加到 `server/internal/settings` 的分区结构体（带缺省值、Validate、密钥加进 Masked/Unmask），不要加 env。前端同步 `web/src/lib/types.ts` 与 `components/settings-forms.tsx`。
+- **env 只有 `ZHIWEI_DB_DSN`（+ 可选 `ZHIWEI_HTTP_ADDR` / web 的 `ZHIWEI_API_ORIGIN`）。** `ZHIWEI_API_ORIGIN` 进 rewrites，构建时写死（web 镜像缺省 `http://server:8080`）。 新配置项一律加到 `server/internal/settings` 的分区结构体（带缺省值、Validate、密钥加进 Masked/Unmask），不要加 env。前端同步 `web/src/lib/types.ts` 与 `components/settings-forms.tsx`。
 - **system prompt 必须恒定**（只依赖品牌 + 业务口径），动态内容放 user 侧——为了 prompt cache，别把时间 / 检索结果塞进 system。
 - **迁移**：`server/db/migrations/pg/<14位UTC时间戳>_<snake>.sql`，已应用文件永不修改（checksum 校验，连注释都不能改；所以首个迁移的注释里还是项目旧名「开元」），不写 down，seed 用 `ON CONFLICT DO NOTHING`。
 - **新渠道** = 实现 `channel.Adapter`（需要回调再实现 `WebhookAdapter`，支持入群审批再实现 `JoinReviewer`）+ 在 `runtime.Apply` 装配；编排器、会话、后台不应需要改动。入群 / 入群申请以 `Inbound.Kind` 区分。
