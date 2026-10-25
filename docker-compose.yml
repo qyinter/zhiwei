@@ -1,0 +1,38 @@
+# 本地开发 / 单机部署用的依赖服务。知微只依赖原生 PG（不需要任何扩展）。
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zhiwei
+      POSTGRES_PASSWORD: zhiwei
+      POSTGRES_DB: zhiwei
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zhiwei"]
+      interval: 5s
+      retries: 10
+
+  # 向量检索用的嵌入服务（可选）：HuggingFace text-embeddings-inference + BAAI/bge-small-zh-v1.5，
+  # 提供 OpenAI 兼容的 /v1/embeddings。常驻内存约 200MB，单条约 20ms。
+  # 启动后到后台「系统设置 → 向量检索」开启；不起这个服务时检索自动退回纯关键词。
+  # 镜像按 CPU 架构二选一：x86_64 服务器用缺省值；Apple Silicon / ARM 服务器设
+  #   TEI_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest
+  # 首次启动会下载模型（约 100MB）到 tei 卷；国内网络可设 HF_ENDPOINT=https://hf-mirror.com。
+  embed:
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.8}
+    restart: unless-stopped
+    command: ["--model-id", "BAAI/bge-small-zh-v1.5", "--auto-truncate"]
+    environment:
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+    ports:
+      - "127.0.0.1:8081:80"
+    volumes:
+      - tei:/data
+
+volumes:
+  pgdata:
+  tei:

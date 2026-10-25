@@ -1,0 +1,180 @@
+/* 设计书统一样式（FA-STD-001 v1.2）：正文 HTML 零 class，本文件只按裸标签选择；
+   带类名的选择器只作用于 doc.js 运行时注入的导航件。
+   配色对齐 docs/设计规范/知微设计系统.html（知微设计系统）：主色蓝 #0075ff、墨黑 #0c1220。 */
+
+:root {
+  --ink: #0c1220;
+  --muted: #6d778b;
+  --body: #414a5c;
+  --line: #e4e7ec;
+  --soft: #f6f8fb;
+  --blue: #0075ff;
+  --code-bg: #f2f4f7;
+  --bg: #ffffff;
+  --toc-w: 264px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f2f4f7;
+    --muted: #8b94a7;
+    --body: #c4cbd8;
+    --line: #2a3446;
+    --soft: #151b26;
+    --blue: #4d9bff;
+    --code-bg: #1b2230;
+    --bg: #0e1420;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  color: var(--body);
+  background: var(--bg);
+  font: 15px/1.75 Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 40px 120px;
+}
+
+/* 有侧栏目录时给它让位（doc.js 注入 .toc 后在 body 上加 .has-toc）。
+   左边距取「贴着侧栏」与「视口居中」的较大者：屏幕够宽时正文在整个视口居中，
+   不够宽时才退到紧挨侧栏。 */
+body.has-toc main {
+  margin-left: max(calc(var(--toc-w) + 24px), calc((100% - 960px) / 2));
+  margin-right: 0;
+}
+@media (max-width: 1100px) {
+  body.has-toc main { margin-left: auto; }
+  .toc { display: none; }
+}
+
+h1, h2, h3, h4 { color: var(--ink); line-height: 1.35; scroll-margin-top: 76px; }
+h1 { margin: 8px 0 20px; font-size: 26px; }
+h2 { margin: 44px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); font-size: 20px; }
+h3 { margin: 30px 0 10px; font-size: 16.5px; }
+h4 { margin: 22px 0 8px; font-size: 15px; }
+
+p { margin: 10px 0; }
+strong { color: var(--ink); }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { margin: 36px 0; border: 0; border-top: 1px solid var(--line); }
+
+ul, ol { margin: 10px 0; padding-left: 26px; }
+li { margin: 4px 0; }
+
+blockquote {
+  margin: 14px 0;
+  padding: 10px 16px;
+  border-left: 3px solid var(--blue);
+  border-radius: 0 8px 8px 0;
+  background: var(--soft);
+  color: var(--muted);
+}
+blockquote p { margin: 6px 0; }
+
+code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--ink);
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
+pre {
+  margin: 14px 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--code-bg);
+}
+pre code { padding: 0; background: none; word-break: normal; }
+
+table {
+  width: 100%;
+  margin: 14px 0;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+/* 宽表横向滚动：doc.js 会把每个 table 包进 .table-wrap */
+.table-wrap { margin: 14px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.table-wrap table { margin: 0; }
+th, td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+th { background: var(--soft); color: var(--ink); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; }
+
+del { color: var(--muted); }
+
+/* ── doc.js 注入件 ── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  font-size: 13px;
+}
+.topbar b { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.toc {
+  position: fixed;
+  top: 58px;
+  bottom: 0;
+  left: 0;
+  width: var(--toc-w);
+  overflow-y: auto;
+  padding: 18px 10px 40px 18px;
+  border-right: 1px solid var(--line);
+  font-size: 13px;
+}
+.toc a {
+  display: block;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toc a:hover { color: var(--ink); background: var(--soft); text-decoration: none; }
+.toc a.h3 { padding-left: 22px; font-size: 12.5px; }
+.toc a.on { color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, transparent); font-weight: 600; }
+
+/* 目录页（index.html）的清单 */
+main > ul.doc-index { padding: 0; list-style: none; }
+.doc-index li { margin: 0; }
+.doc-index a {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 8px;
+}
+.doc-index a:hover { background: var(--soft); text-decoration: none; }
+.doc-index code { flex: none; background: none; color: var(--muted); }
+.doc-index b { color: var(--ink); font-weight: 600; }
+.doc-index small { margin-left: auto; flex: none; color: var(--muted); }

@@ -1,0 +1,362 @@
+{
+ "code": 200,
+ "message": "OK",
+ "data": {
+  "list": [
+   {
+    "canonicalName": "claude-fable-5",
+    "capabilities": {
+     "cache": true,
+     "image": true,
+     "tools": true,
+     "stream": true,
+     "reasoning": true,
+     "webSearch": true,
+     "responseSchema": true
+    },
+    "channels": [
+     {
+      "name": "Claude官方分组",
+      "multiplier": 1.5
+     }
+    ],
+    "charges": {
+     "cache_read": {
+      "unit": "per_M_tokens",
+      "price": "1"
+     },
+     "cache_write_1h": {
+      "unit": "per_M_tokens",
+      "price": "20"
+     },
+     "cache_write_5m": {
+      "unit": "per_M_tokens",
+      "price": "12.5"
+     },
+     "completion": {
+      "unit": "per_M_tokens",
+      "price": "50"
+     },
+     "prompt": {
+      "unit": "per_M_tokens",
+      "price": "10"
+     },
+     "web_search": {
+      "unit": "per_k_calls",
+      "price": "10"
+     }
+    },
+    "contextWindow": 1000000,
+    "displayName": "Claude Fable 5",
+    "maxOutputTokens": 128000,
+    "priceCurrency": "usd",
+    "priceMultiplier": 1.5,
+    "providerFamily": "anthropic",
+    "throughputTps": 81.43353063899009,
+    "updatedAt": "2026-09-01T02:06:24.649784Z"
+   },
+   {
+    "canonicalName": "gpt-image-2",
+    "capabilities": {
+     "image": true
+    },
+    "channels": [
+     {
+      "name": "Azure ChatGPT画图专用",
+      "multiplier": 3.5
+     }
+    ],
+    "charges": {
+     "cache_read": {
+      "unit": "per_M_tokens",
+      "price": "1.25"
+     },
+     "image_cache_read": {
+      "unit": "per_M_tokens",
+      "price": "2"
+     },
+     "image_input": {
+      "unit": "per_M_tokens",
+      "price": "8"
+     },
+     "image_output": {
+      "unit": "per_M_tokens",
+      "price": "30"
+     },
+     "prompt": {
+      "unit": "per_M_tokens",
+      "price": "5"
+     }
+    },
+    "contextWindow": null,
+    "displayName": "GPT-Image-2",
+    "maxOutputTokens": null,
+    "priceCurrency": "usd",
+    "priceMultiplier": 3.5,
+    "providerFamily": "openai",
+    "throughputTps": 35.09378709550564,
+    "updatedAt": "2026-09-05T01:34:54.130076Z"
+   },
+   {
+    "canonicalName": "deepseek-v4-pro",
+    "capabilities": {
+     "cache": true,
+     "tools": true,
+     "stream": true,
+     "reasoning": true,
+     "responseSchema": true
+    },
+    "channels": [
+     {
+      "name": "DeepSeek官方分组",
+      "multiplier": 0.65
+     }
+    ],
+    "charges": {
+     "cache_read": {
+      "unit": "per_M_tokens",
+      "price": "0.15"
+     },
+     "completion": {
+      "unit": "per_M_tokens",
+      "price": "13.5"
+     },
+     "prompt": {
+      "unit": "per_M_tokens",
+      "price": "4.5"
+     }
+    },
+    "contextWindow": 1000000,
+    "discountPercent": 35,
+    "displayName": "DeepSeek V4 Pro",
+    "health": {
+     "availability": {
+      "success": 480,
+      "total": 490
+     },
+     "lastLatencyMs": 3448,
+     "lastProbeAt": "2026-10-24T11:30:49.288895Z",
+     "status": "ok"
+    },
+    "maxOutputTokens": 384000,
+    "priceCurrency": "cny",
+    "priceMultiplier": 0.65,
+    "providerFamily": "deepseek",
+    "throughputTps": 57.81501101401096,
+    "updatedAt": "2026-09-24T09:06:58.24917Z"
+   },
+   {
+    "canonicalName": "claude-opus-5-5",
+    "capabilities": {
+     "cache": true,
+     "image": true,
+     "tools": true,
+     "stream": true,
+     "reasoning": true,
+     "webSearch": true,
+     "responseSchema": true
+    },
+    "channels": [
+     {
+      "name": "Kiro-Claude分组",
+      "multiplier": 0.5
+     },
+     {
+      "name": "Claude官方分组",
+      "multiplier": 1.5
+     }
+    ],
+    "charges": {
+     "cache_read": {
+      "unit": "per_M_tokens",
+      "price": "0.2"
+     },
+     "cache_write_1h": {
+      "unit": "per_M_tokens",
+      "price": "8"
+     },
+     "cache_write_5m": {
+      "unit": "per_M_tokens",
+      "price": "5"
+     },
+     "completion": {
+      "unit": "per_M_tokens",
+      "price": "20"
+     },
+     "prompt": {
+      "unit": "per_M_tokens",
+      "price": "4"
+     },
+     "web_search": {
+      "unit": "per_k_calls",
+      "price": "10"
+     }
+    },
+    "contextWindow": 1000000,
+    "discountPercent": 70,
+    "displayName": "Claude Opus 5.5",
+    "health": {
+     "availability": {
+      "success": 492,
+      "total": 492
+     },
+     "lastLatencyMs": 1171,
+     "lastProbeAt": "2026-10-24T11:41:46.994965Z",
+     "status": "ok"
+    },
+    "maxOutputTokens": null,
+    "priceCurrency": "usd",
+    "priceMultiplier": 0.3,
+    "providerFamily": "anthropic",
+    "throughputTps": 94.95036498981766,
+    "updatedAt": "2026-09-23T01:42:37.020343Z"
+   },
+   {
+    "canonicalName": "MiniMax-M3",
+    "capabilities": {
+     "cache": true,
+     "image": true,
+     "tools": true,
+     "video": true,
+     "stream": true,
+     "reasoning": true,
+     "responseSchema": true
+    },
+    "channels": [
+     {
+      "name": "MiniMax官方分组",
+      "multiplier": 0.6
+     }
+    ],
+    "charges": {
+     "cache_read": {
+      "unit": "per_M_tokens",
+      "price": "0.84"
+     },
+     "completion": {
+      "unit": "per_M_tokens",
+      "price": "16.8"
+     },
+     "prompt": {
+      "unit": "per_M_tokens",
+      "price": "4.2"
+     }
+    },
+    "contextWindow": 1000000,
+    "discountPercent": 40,
+    "displayName": "MiniMax M3",
+    "health": {
+     "availability": {
+      "success": 485,
+      "total": 487
+     },
+     "lastLatencyMs": 1956,
+     "lastProbeAt": "2026-10-24T11:41:18.94812Z",
+     "status": "ok"
+    },
+    "maxOutputTokens": 131072,
+    "priceCurrency": "cny",
+    "priceMultiplier": 0.6,
+    "providerFamily": "minimax",
+    "throughputTps": 51.20992081995228,
+    "updatedAt": "2026-09-01T07:06:45.497472Z"
+   }
+  ],
+  "channels": [
+   {
+    "name": "ChatGPT官方分组",
+    "multiplier": 0.3
+   },
+   {
+    "name": "Grok官方分组",
+    "multiplier": 0.4
+   },
+   {
+    "name": "ChatGPT稳定分组",
+    "multiplier": 0.5
+   },
+   {
+    "name": "Kiro-Claude分组",
+    "multiplier": 0.5
+   },
+   {
+    "name": "GLM官方分组",
+    "multiplier": 0.6
+   },
+   {
+    "name": "MiniMax官方分组",
+    "multiplier": 0.6
+   },
+   {
+    "name": "Qwen官方分组",
+    "multiplier": 0.6
+   },
+   {
+    "name": "DeepSeek官方分组",
+    "multiplier": 0.65
+   },
+   {
+    "name": "Claude官方分组",
+    "multiplier": 1.5
+   },
+   {
+    "name": "Gemini官方分组",
+    "multiplier": 1.6
+   },
+   {
+    "name": "Azure ChatGPT分组",
+    "multiplier": 2.5
+   },
+   {
+    "name": "Azure ChatGPT画图专用",
+    "multiplier": 3.5
+   },
+   {
+    "name": "Jev官方分组",
+    "multiplier": 3.5
+   }
+  ],
+  "chargeOrder": [
+   "prompt",
+   "completion",
+   "request",
+   "internal_reasoning",
+   "tool_call_overhead",
+   "cache_read",
+   "cache_write",
+   "cache_write_5m",
+   "cache_write_1h",
+   "cache_storage",
+   "image_input",
+   "image_output",
+   "image_cache_read",
+   "image_output_512px",
+   "image_output_1024px",
+   "image_output_2048px",
+   "image_output_4096px",
+   "audio_input",
+   "audio_output",
+   "audio_cache_read",
+   "video_input",
+   "video_output",
+   "video_output_720p",
+   "video_output_1080p",
+   "video_output_4k",
+   "web_search",
+   "web_search_image",
+   "web_search_reasoning",
+   "web_search_non_reasoning",
+   "google_search_grounding",
+   "google_maps_grounding",
+   "code_execution_per_hour",
+   "container_session_1gb",
+   "container_session_4gb",
+   "container_session_16gb",
+   "container_session_64gb",
+   "file_search_call",
+   "music_per_song",
+   "file_storage"
+  ],
+  "total": 5
+ }
+}

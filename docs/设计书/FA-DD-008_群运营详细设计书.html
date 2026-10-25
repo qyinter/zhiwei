@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-008 群运营详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-008 群运营详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-008</td></tr>
+<tr><td>文档名称</td><td>群运营（群消息时间线 / 主动回复 / 入群欢迎 / 入群审核 / 按群设置 / 问题排行）详细设计书</td></tr>
+<tr><td>版本</td><td>0.3</td></tr>
+<tr><td>作成日</td><td>2026-10-24</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/agent/{proactive,groupops,topics,llmjson}.go</code>、<code>server/internal/settings/settings.go</code>（GroupPolicy / *On / Any*）、<code>server/internal/store/topics.go</code>、<code>server/internal/httpapi/topics.go</code>、<code>server/internal/agent/orchestrator.go</code>（Handle / bufferGroupMessage）、<code>server/internal/store/groupops.go</code>、<code>server/internal/httpapi/groupops.go</code>、<code>server/internal/channel/qqbot/qqbot.go</code>（dispatchMember / ReviewJoin）、<code>server/internal/channel/telegram/telegram.go</code>（memberJoins / role）、<code>web/src/app/admin/{proactive,join-requests,groups,topics}/page.tsx</code>、测试 <code>flows_db_test.go</code>、<code>groupops_test.go</code>、<code>store_db_test.go</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-24</td><td>初版实装：主动补位、入群欢迎、入群审核；事件来源为 QQ 官方 GROUP_MEMBER_ADD / GROUP_JOIN_REQUEST 与 TG new_chat_members</td></tr>
+<tr><td>0.2</td><td>2026-10-24</td><td>QQ 欢迎语支持自定义 Markdown（formatQq）、{at} / {brand} / {ask:问题} 占位、样式预设、实时预览与发送测试</td></tr>
+<tr><td>0.3</td><td>2026-10-25</td><td>按群设置（4.6，覆盖主动回复 / 静默阈值 / 欢迎 / 审核 / 反思 / 排行）；问题排行（4.7，含私聊来源、趋势、改名 / 合并 / 删除）；群时间线写入图片占位</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>客服群里不是每个问题都有人 @ 机器人。群运营让机器人在群里多做几件事：提问长时间没人答时谨慎补位、新成员入群时打招呼、按业务规则自动审批入群申请、统计大家最常问的问题；每个群可以单独开关这些功能。</p>
+<h3>1.2 范围</h3>
+<p>群消息时间线（主动回复、反思沉淀、问题排行共用的素材）、主动回复扫描器、可答性判断、入群欢迎、入群审核与处理记录、按群设置、问题排行，以及后台「群管理」「问题排行」「主动回复」「入群审核」页。反思沉淀见 FA-DD-009。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-003（事件与订阅位）、FA-DD-004（客服推理、主动模式）、FA-DD-009（反思沉淀）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>群时间线</td><td><code>group_messages</code>：按群组织的全部群消息（含未 @ 机器人的），带发言人角色</td></tr>
+<tr><td>客服发言</td><td>角色为 <code>owner</code>（群主）或 <code>admin</code>（管理员）的群消息</td></tr>
+<tr><td>静默阈值</td><td>提问后经过多久仍无人应答才考虑补位（<code>proactive.silenceSec</code>）</td></tr>
+<tr><td>游标</td><td><code>poller_cursors</code> 中按群记录的扫描进度，key = <code>proactive:{channel}:{chatId}</code>、<code>topic:{channel}:{chatId}</code>、<code>topic:private</code></td></tr>
+<tr><td>群策略</td><td><code>groups.policies[]</code> 中某个群的单独设置；字段为 null 表示跟随全局</td></tr>
+<tr><td>主题</td><td>问题排行里的一类问题（<code>question_topics</code>），由模型归类时新建或归入</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>入站事件经编排器 <code>Handle</code> 分流：入群事件 → 欢迎；入群申请 → 审核（独立 goroutine）；群消息 → 写时间线，只有 @ 机器人的继续走问答流程。主动回复是独立后台循环 <code>RunProactive</code>，每轮重新读取设置，改设置无需重启。</p>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>可答性判断与后台结构化调用统一走 <code>askJSON</code>：一次无工具、无历史的调用，system 恒定、数据在 user 侧、宽松解析首个 <code>{…}</code>；每次调用记 <code>llm_calls.purpose</code>（judge / reflect / compact / promote）。</li>
+<li>QQ 群成员事件订阅位 <code>GROUP_MEMBER_EVENT (1&lt;&lt;24)</code>，只在入群欢迎或入群审核开启时订阅（未开通权限时订阅会被网关拒绝）。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li><strong>主动回复需要全量群消息</strong>：QQ 需在开放平台开通「接收所有消息」并打开设置 <code>channel.qqbot.groupAll</code>；TG 需在 BotFather 关闭 privacy mode。否则时间线里只有 @ 消息，扫描器没有候选。</li>
+<li>QQ 补位回复走被动回复（静默阈值缺省 180 秒，在 5 分钟窗口内）；超窗自动改发主动消息（FA-DD-003）。</li>
+<li>QQ 入群事件 <code>GROUP_MEMBER_ADD</code> 不支持被动回复（event_id 只支持 INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE），欢迎语走主动消息，计入单群每天 1000 条额度。</li>
+<li>QQ 入群事件不带昵称；成员信息接口 <code>GET /v2/groups/{group}/members/{member}</code> 目前仅白名单机器人可用（错误码 11253），因此昵称取「同一用户最近出现过的昵称」，再取不到用「新朋友」。</li>
+<li>入群申请事件只有机器人是群管理员时才会推送；审批接口 60 QPM。入群审核只支持 QQ。</li>
+<li>群白名单（<code>agent.allowAllChats / chats</code>）同时约束时间线写入、主动回复、欢迎、审核与问题排行；群策略只在白名单内的群生效。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>入口 / API</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>群时间线写入</td><td>编排器 <code>bufferGroupMessage</code></td></tr>
+<tr><td>F-02</td><td>主动回复扫描</td><td>后台循环 <code>RunProactive</code></td></tr>
+<tr><td>F-03</td><td>主动回复页</td><td><code>GET /api/proactive</code>、<code>PATCH /api/proactive/:id {quality}</code>；<code>/admin/proactive</code></td></tr>
+<tr><td>F-04</td><td>入群欢迎</td><td>QQ <code>GROUP_MEMBER_ADD</code>、TG <code>new_chat_members</code></td></tr>
+<tr><td>F-05</td><td>入群审核</td><td>QQ <code>GROUP_JOIN_REQUEST</code> → <code>POST /v2/groups/{group}/approval_join_request/{member}</code></td></tr>
+<tr><td>F-06</td><td>入群审核记录页</td><td><code>GET /api/join-requests?page=</code>；<code>/admin/join-requests</code></td></tr>
+<tr><td>F-07</td><td>按群设置 / 群管理页</td><td><code>GET /api/group-policies</code>；保存走 <code>PUT /api/settings {groups:{policies}}</code>；<code>/admin/groups</code></td></tr>
+<tr><td>F-08</td><td>问题归类</td><td>后台循环 <code>RunTopics</code>；<code>POST /api/topics/run</code>（立即归类）</td></tr>
+<tr><td>F-09</td><td>问题排行页</td><td><code>GET /api/topics?days=&amp;tz=</code>、<code>GET /api/topics/:id/occurrences?days=&amp;tz=&amp;page=</code>、<code>PATCH /api/topics/:id {title}</code>、<code>POST /api/topics/:id/merge {into}</code>、<code>DELETE /api/topics/:id</code>；<code>/admin/topics</code></td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 群时间线写入（F-01）</h3>
+<ol>
+<li>S-01 群 / 频道消息先过群白名单，不在白名单直接丢弃。</li>
+<li>S-02 不带图片的整句命令（重置 / 帮助 / 人工）→ 不写。带图片的消息正文后追加占位「[图片]」（多张为「[图片×N]」），只有图片的写占位；正文与图片都没有 → 不写。时间线只存文字，图片本身不下载（FA-DD-004 4.12）。</li>
+<li>S-03 写入 <code>(channel, chat_type, chat_id, user_id, user_name, role, content, platform_msg_id, mentioned)</code>。同一平台消息重复投递只合并 <code>mentioned = 旧值 OR 新值</code>：QQ 全量模式下同一条 @ 消息会以 GROUP_MESSAGE_CREATE 与 GROUP_AT_MESSAGE_CREATE 各推一次，前者可能识别不出 @。</li>
+<li>S-04 未 @ 机器人的消息到此结束；@ 机器人的继续走 FA-DD-004 问答流程。</li>
+<li>角色来源：QQ 取事件 <code>author.member_role</code>；TG 取 <code>getChatAdministrators</code>（creator → owner、administrator → admin，按群缓存 10 分钟，失败也缓存空表）。</li>
+<li>保留：群时间线保留 <code>回看窗口 + 静置阈值</code>（且至少 1 天），清理在反思循环中执行，与反思开关无关；主动回复记录保留 90 天。</li>
+</ol>
+<h3>4.2 主动回复（F-02）</h3>
+<pre><code>flowchart TD
+  T[每 scanSec 秒] --&gt; C{群在白名单且渠道在线}
+  C --&gt;|否| X[跳过]
+  C --&gt;|是| K{有游标}
+  K --&gt;|否 冷启动| S0[游标 = now − silence，不补积压]
+  K --&gt;|是| R[取 游标, now − silence 内普通群友未 @ 消息]
+  R --&gt; G[按人聚合 代表 = 最后一条]
+  G --&gt; G1{闸 1 抑制}
+  G1 --&gt;|管理员之后发过言 / 人工接待中 / 主流程已回复| X2[跳过此人]
+  G1 --&gt;|通过| G2{闸 2 可答性判断}
+  G2 --&gt;|false 或判断失败| X2
+  G2 --&gt;|true| G3{闸 3 主动模式推理}
+  G3 --&gt;|__NO_ANSWER__ / 空 / 出错| X2
+  G3 --&gt;|有答案| SEND[引用代表消息回复 + 记会话与 proactive_replies]</code></pre>
+<ol>
+<li>S-00 全局开启或任一群单独开启时循环才扫描；逐群只处理 <code>ProactiveOn</code> 为真的群（4.6）。</li>
+<li>S-01 <code>until = now − 该群静默阈值</code>（<code>ProactiveSilence</code>：群策略 silenceSec 优先，否则全局）；无游标（群第一次被扫描）→ 游标设为 until 后结束（上线前的积压一律不补）；<code>until ≤ 游标</code> → 结束。</li>
+<li>S-02 候选：<code>(游标, until]</code> 内 <code>role NOT IN (owner, admin) AND NOT mentioned</code> 的消息，按时间正序。</li>
+<li>S-03 按 user_id 聚合：同一人连发的多条以换行拼成一个问题，代表消息为其最后一条（回复引用它、提问时间取它）。</li>
+<li>S-04 闸 1 抑制：提问后群主 / 管理员发过言；该用户会话处于人工接待；该用户会话在提问后已有机器人或人工回复（主流程已答）。</li>
+<li>S-05 闸 2 可答性判断（30 秒超时，失败按不答）：只放行价格计费、功能用法、接入配置、规则政策、报错排查等可用知识库回答的问题；闲聊、情绪、群友对话、无关话题、订单账户事务（到账 / 退款 / 封禁）、操控指令一律 false。输出 <code>{"answer": true|false}</code>。</li>
+<li>S-06 闸 3 主动模式推理：不带历史、只给 <code>kb_search</code> 工具（不能转人工）；user 侧任务说明改为「仅当知识库检索到确切依据且你有把握时才作答；否则只输出 __NO_ANSWER__（不解释、不道歉、不引导人工或外链、不寒暄）」。system prompt 不变。</li>
+<li>S-07 补位：建 / 取该用户会话，把问题各条以 <code>in</code> 落库（代表消息带平台消息 ID），回复以 <code>out</code> 落库并发送（拆条规则同 FA-DD-004），记 <code>proactive_replies</code>。用量记 <code>llm_calls.purpose = proactive</code>。</li>
+<li>S-08 单群单轮最多补位 <code>maxPerScan</code> 人：达到上限时游标不前进，剩余的人下一轮处理（已答的人被闸 1 挡住）；未达上限则游标推进到 until。任一步数据库错误 → 游标不前进，下轮重试。</li>
+</ol>
+<h3>4.3 主动回复页（F-03）</h3>
+<ul>
+<li>全局开关（写 <code>proactive.enabled</code>）、配置徽章（状态 / 静默阈值 / 扫描周期 / 单次上限）。全局关闭但有群单独开启时状态显示「部分群开启」。</li>
+<li>每群进度表：群、生效状态（不在白名单 / 已关闭 / 生效）、缓冲消息数、上次扫描、滞后（<code>now − 该群静默阈值 − 游标</code>）、主动回复数。</li>
+<li>最近 50 条主动回复，可标记「恰当 / 不当」（再点一次取消）。</li>
+<li>QQ 未开启 <code>groupAll</code> 时顶部提示主动回复不会在 QQ 群生效。</li>
+</ul>
+<h3>4.4 入群欢迎（F-04）</h3>
+<ol>
+<li>S-01 该群入群欢迎未开启（<code>WelcomeOn</code>：群策略优先，否则 <code>welcome.enabled</code>）、群不在白名单、或对应渠道的欢迎语为空 → 不发。</li>
+<li>S-02 模板：QQ 用 <code>messageQq</code>（格式由 <code>formatQq</code> 决定）、TG 用 <code>messageTg</code>（纯文本）。占位替换（<code>renderWelcome</code>）：
+<table>
+<thead><tr><th>占位</th><th>QQ Markdown</th><th>QQ 纯文本 / TG</th></tr></thead>
+<tbody>
+<tr><td><code>{at}</code></td><td><code>&lt;qqbot-at-user id="{member_openid}" /&gt;</code>（客户端显示 @昵称）</td><td>昵称</td></tr>
+<tr><td><code>{name}</code></td><td colspan="2">事件昵称 → 同一用户最近出现过的昵称 → 「新朋友」（QQ 入群事件不带昵称，多数为「新朋友」）</td></tr>
+<tr><td><code>{brand}</code></td><td colspan="2">品牌名，空为「本群」</td></tr>
+<tr><td><code>{ask:问题}</code></td><td><code>&lt;qqbot-cmd-input text="…" show="…" reference="false" /&gt;</code>（参数指令：点击把问题填进输入框；参数 urlencode）</td><td>「问题」</td></tr>
+</tbody>
+</table></li>
+<li>S-03 以主动消息发到群（无 ReplyTo）。QQ Markdown 发送体 <code>{"msg_type":2,"markdown":{"content":…}}</code>（群聊 / 单聊自定义 Markdown 自 2026-04-23 起对所有机器人开放，无需模板）。</li>
+<li>后台「发送测试」：<code>POST /api/welcome/test {channel, chatId, welcome}</code> 按草稿（不必先保存）发到所选群，@ 该群最近发过言的用户；测试目标来自 <code>GET /api/groups</code>（会话表里出现过的群）。</li>
+<li>后台内置五套 Markdown 样式预设（卡片 / 入口导航 / 简洁 / 快捷提问 / 群规公告）与近似 QQ 气泡的实时预览（<code>web/src/components/welcome-editor.tsx</code>）。QQ 客户端会把列表圆点单独排一行，预设一律用「每行一条 + emoji 开头」代替 Markdown 列表。模板与任一预设逐字一致时高亮该预设，否则标「当前：自定义模板」，套用预设前弹确认。缺省模板 = 卡片（<code>settings.DefaultWelcomeQQ</code>，与前端逐字一致，由 <code>settings_test.go</code> 校验）。</li>
+<li>事件来源：QQ <code>GROUP_MEMBER_ADD {group_openid, member_openid}</code>；TG 消息的 <code>new_chat_members</code>（privacy mode 开着也能收到，跳过机器人账号）。</li>
+</ol>
+<h3>4.5 入群审核（F-05）</h3>
+<ol>
+<li>S-00 该群入群审核未开启（<code>JoinReviewOn</code>）→ 不处理。</li>
+<li>S-01 事件 <code>GROUP_JOIN_REQUEST</code>：取 <code>verify_info.verify_message</code> 与 <code>review_qa_list[].answer</code>，trim 后按行拼成答案；<code>auto_approved</code> 存在表示平台策略已自动通过 → 只记录 <code>auto</code>。</li>
+<li>S-02 提取 ID：<code>idPattern</code> 外包「前后不紧贴字母数字」，取第一个匹配；无匹配或规则为空则取整段答案。答案为空 → 不调接口直接拒绝。</li>
+<li>S-03 核对：<code>GET {checkUrl}?id=…</code>（保留原 query），5 秒超时；只认 <code>{"status":"ok"}</code>（同意）/ <code>{"status":"error"}</code>（拒绝）。网络错误、超时、非 2xx、其他内容 → 记 <code>pending</code>，不审批，留给管理员在 QQ 里处理。</li>
+<li>S-04 审批：<code>{"op":"approve"|"decline","join_request_id":…,"reject_reason":拒绝理由}</code>；接口出错记 <code>failed</code>。</li>
+<li>S-05 每个申请记一行 <code>join_requests</code>（答案原文、提取 ID、结果、说明）。</li>
+</ol>
+<h3>4.6 按群设置 / 群管理页（F-07）</h3>
+<ol>
+<li>S-01 设置分区 <code>groups</code> = <code>{policies: [GroupPolicy]}</code>。每条以 <code>chat = 渠道:群ID</code> 标识，<code>proactive / welcome / joinReview / reflect / topics</code> 为三态开关（null 跟随全局、true 单独开启、false 单独关闭），<code>silenceSec</code> 为 null 时用全局静默阈值，<code>note</code> 为后台备注。</li>
+<li>S-02 生效值：<code>XxxOn(channel, chatId) = 群策略非 null ? 群策略 : 全局开关</code>。单独开启覆盖全局关闭，反之亦然（群策略覆盖全局）。</li>
+<li>S-03 扫描器每轮先看 <code>AnyXxx()</code>（全局开启或任一群单独开启）决定要不要跑，再逐群过 <code>XxxOn</code>；QQ 群成员事件订阅条件改为 <code>AnyWelcome() || AnyJoinReview()</code>。</li>
+<li>S-04 校验：群标识须匹配 <code>^(qqbot|telegram|wecom):\S+$</code> 且不重复；备注不超过 64 字；静默阈值 0~86400；有任一群开启入群审核时也要求核对接口、有任一群开启欢迎时也做示例内容检查。</li>
+<li>S-05 保存：前端整体提交 <code>PUT /api/settings {groups:{policies}}</code>（分区级局部更新，其它分区不动）。<code>Groups.UnmarshalJSON</code> 每次解到全新切片——设置保存是「以当前值为底再覆盖」，复用旧切片会让旧元素里没出现在新 JSON 里的字段残留。全部跟随全局且无备注的策略不保存。系统设置页保存时不回写 <code>groups</code>，避免用打开页面时的旧值覆盖。</li>
+<li>S-06 群管理页列出「会话表里出现过的群 + 群时间线里的群 + 已有策略的群」，按最近消息倒序；每列显示该功能的生效值，单独设置的标品牌色圆点；不在白名单的群置灰。「按群 ID 添加」可给还没出现过的群预先设置。</li>
+</ol>
+<h3>4.7 问题排行（F-08 / F-09）</h3>
+<pre><code>flowchart TD
+  T[每 scanMin 分钟 且 AnyTopics] --&gt; P[清理 retentionDays 之前的记录]
+  P --&gt; G[逐个白名单内、TopicsOn 的群]
+  G --&gt; B[取 游标, now − 2 分钟 内普通群友发言 ≤ windowMax 条]
+  B --&gt; F[去图片占位，少于 3 字的跳过]
+  F --&gt; L[askJSON：现有主题前 40 个 + 消息 JSONL]
+  L --&gt; R[校验并落到主题：topicId 归入 / newTitle 近义并入或新建 / noise 丢弃]
+  R --&gt; S[同一事务：写主题与出现记录 + 推进游标]
+  S --&gt;|批满 且 未满 5 批| B
+  G --&gt; PV[topics.enabled 时再处理私聊来源]</code></pre>
+<ol>
+<li>S-01 来源：群时间线里 <code>role NOT IN (owner, admin)</code> 的发言（按群，游标 <code>topic:{channel}:{chatId}</code>，受群策略控制）；私聊（<code>chat_type IN (private, guild_dm)</code>，不含体验台）里客户发来的消息（游标 <code>topic:private</code>，只受全局开关控制）。群里 @ 机器人的消息已在时间线里，不重复取。</li>
+<li>S-02 静置 2 分钟（<code>TopicSettle</code>）再归类，等同一个人说完；冷启动从 7 天前开始；每来源每轮最多 5 批，积压分几轮追平；批未满即把游标推到 <code>now − 2 分钟</code>。</li>
+<li>S-03 归类提示词：只统计与本产品相关的咨询（接入配置、价格计费、账户事务、使用中的报错），通用编程、其他产品、闲聊寒暄一律 noise；拿不准算 noise；输出 <code>{"items":[{"i":0,"topicId":3},{"i":1,"newTitle":"退款到账时间"},{"i":2,"noise":true}]}</code>。用量记 <code>purpose = topic</code>。</li>
+<li>S-04 校验（<code>resolveTopics</code>）：越界 / 重复的序号丢弃；不在本次交给模型的主题清单里的 topicId（幻觉）丢弃；新标题截到 60 字，与现有主题（最近活跃的 500 个）或本批更早的新标题同名或近乎相同（<code>kb.NearlySame</code>）时并入，否则新建。</li>
+<li>S-05 落库（<code>SaveTopicBatch</code>）：新建主题（同名复用）、写出现记录、刷新主题活跃时间、推进游标在同一事务；模型调用或写库失败时游标不动，下一轮重跑同一批，不重复计数。</li>
+<li>S-06 排行：时间窗起点 = 浏览器时区下 <code>days−1</code> 天前的零点；按次数倒序取前 100，附人数、会话数、最近时间、上一个等长时间窗的次数（趋势：新 / 持平 / ±N），以及最近 3 条不同的原话。点主题看全部原话（分页 20）。</li>
+<li>S-07 管理：改名（与已有主题同名返回 409，提示改用合并）；合并（把 A 的全部记录并入 B 后删除 A）；删除（连同全部记录）。</li>
+<li>S-08 保留：出现记录保留 <code>retentionDays</code> 天；因此变空且之后没再被归入的主题一并删除。</li>
+</ol>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表.列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>group_messages.channel / chat_type / chat_id</td><td>VARCHAR</td><td>索引 (channel, chat_id, created_at)</td></tr>
+<tr><td>group_messages.user_id / user_name</td><td>VARCHAR</td><td></td></tr>
+<tr><td>group_messages.role</td><td>VARCHAR(16)</td><td>owner / admin / member / ''</td></tr>
+<tr><td>group_messages.content</td><td>TEXT</td><td></td></tr>
+<tr><td>group_messages.platform_msg_id</td><td>TEXT</td><td>部分唯一索引 (channel, chat_id, platform_msg_id) WHERE &lt;&gt; ''</td></tr>
+<tr><td>group_messages.mentioned</td><td>BOOLEAN</td><td>是否 @ 了机器人</td></tr>
+<tr><td>poller_cursors.key / at / updated_at</td><td>VARCHAR(255) PK / TIMESTAMPTZ</td><td>at = 游标位置，updated_at = 上次推进时间</td></tr>
+<tr><td>proactive_replies.*</td><td></td><td>channel、chat_id、user_id、user_name、question、answer、quality（ok / bad / ''）、created_at</td></tr>
+<tr><td>join_requests.answer / extracted_id</td><td>TEXT / VARCHAR(255)</td><td></td></tr>
+<tr><td>join_requests.decision</td><td>VARCHAR(16)</td><td>approved / declined / pending / auto / failed</td></tr>
+<tr><td>join_requests.detail</td><td>TEXT</td><td>核对接口返回或错误原因</td></tr>
+<tr><td>llm_calls.purpose</td><td>VARCHAR(16) DEFAULT 'reply'</td><td>reply / proactive / judge / reflect / compact / promote / topic</td></tr>
+<tr><td>question_topics.title</td><td>VARCHAR(255) UNIQUE</td><td>主题名称</td></tr>
+<tr><td>question_topics.updated_at</td><td>TIMESTAMPTZ</td><td>最近一次被归入的时间（越活跃越先交给模型参考）</td></tr>
+<tr><td>question_occurrences.topic_id</td><td>BIGINT FK ON DELETE CASCADE</td><td>索引 (topic_id, asked_at DESC)</td></tr>
+<tr><td>question_occurrences.channel / chat_type / chat_id / user_id / user_name</td><td>VARCHAR</td><td>来源</td></tr>
+<tr><td>question_occurrences.text</td><td>TEXT</td><td>原话（去图片占位，截到 500 字）</td></tr>
+<tr><td>question_occurrences.asked_at</td><td>TIMESTAMPTZ</td><td>原消息时间，排行按它划时间窗；索引 (asked_at)</td></tr>
+</tbody>
+</table>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>proactive</code>、<code>welcome</code>、<code>joinReview</code>、<code>topics</code>、<code>groups</code>（字段见第 7 章）；<code>channel.qqbot.groupAll</code>。迁移 <code>20261025100000_usage_images_topics.sql</code>。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>quality 只能是 ok / bad / 空</td></tr>
+<tr><td>400</td><td>QQ 欢迎语格式只支持 markdown / text</td></tr>
+<tr><td>400</td><td>QQ 欢迎语里还有预设的示例内容（example.com 网址或 QQ 10000），请换成你们自己的再开启入群欢迎</td></tr>
+<tr><td>400</td><td>请选择测试群</td></tr>
+<tr><td>502</td><td>发送失败：{平台错误 / 欢迎语为空}</td></tr>
+<tr><td>400</td><td>开启入群审核需要填写以 http:// 或 https:// 开头的核对接口</td></tr>
+<tr><td>400</td><td>入群审核的 ID 提取规则不是合法的正则表达式</td></tr>
+<tr><td>400</td><td>主动回复静默阈值需在 0~86400 秒之间</td></tr>
+<tr><td>400</td><td>主动回复扫描间隔需在 1~3600 秒之间</td></tr>
+<tr><td>400</td><td>主动回复单次最多补位数需在 1~20 之间</td></tr>
+<tr><td>400</td><td>按群设置的群标识「{chat}」格式不对，应为 渠道:群ID（如 qqbot:ABCDEF）</td></tr>
+<tr><td>400</td><td>按群设置里「{chat}」重复了</td></tr>
+<tr><td>400</td><td>按群设置的备注不超过 64 字</td></tr>
+<tr><td>400</td><td>按群设置的主动回复静默阈值需在 0~86400 秒之间</td></tr>
+<tr><td>400</td><td>问题排行扫描间隔需在 1~1440 分钟之间</td></tr>
+<tr><td>400</td><td>问题排行单次归类消息数需在 5~200 之间</td></tr>
+<tr><td>400</td><td>问题排行保留天数需在 1~365 之间</td></tr>
+<tr><td>400</td><td>统计天数需在 1~90 之间</td></tr>
+<tr><td>400</td><td>时区参数无效</td></tr>
+<tr><td>400</td><td>主题名称为 1~60 字</td></tr>
+<tr><td>409</td><td>已有主题「{title}」，请改用「合并到…」</td></tr>
+<tr><td>502</td><td>归类失败：{原因}</td></tr>
+<tr><td>404</td><td>记录不存在</td></tr>
+</tbody>
+</table>
+<p>入群审核记录的说明（照抄实现）：「平台入群策略已自动通过」「申请未填写答案」「核对接口返回 ok / error」「核对失败，留给管理员处理：{原因}」「…；审批接口出错：{原因}」。核对接口原因：「核对接口返回 HTTP {状态}」「核对接口返回无法识别：{正文前 200 字}」。</p>
+
+<h2>7. 配置项</h2>
+<table>
+<thead><tr><th>键</th><th>缺省</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>proactive.enabled</td><td>false</td><td>全局开关</td></tr>
+<tr><td>proactive.silenceSec</td><td>180</td><td>静默阈值（秒）</td></tr>
+<tr><td>proactive.scanSec</td><td>60</td><td>扫描间隔（秒，最小 1）</td></tr>
+<tr><td>proactive.maxPerScan</td><td>2</td><td>单群单轮最多补位人数</td></tr>
+<tr><td>welcome.enabled</td><td>false</td><td></td></tr>
+<tr><td>welcome.formatQq</td><td>markdown</td><td>markdown / text</td></tr>
+<tr><td>welcome.messageQq</td><td>卡片样式（<code>settings.DefaultWelcomeQQ</code>）</td><td></td></tr>
+<tr><td>welcome.messageTg</td><td>Welcome {name}! Feel free to @mention me if you have any questions.</td><td></td></tr>
+<tr><td>joinReview.enabled</td><td>false</td><td>仅 QQ</td></tr>
+<tr><td>joinReview.checkUrl</td><td>""</td><td>开启时必填，例如 <code>https://example.com/api/member-check</code></td></tr>
+<tr><td>joinReview.idPattern</td><td><code>[A-Za-z0-9]{10}</code></td><td>空 = 整段答案</td></tr>
+<tr><td>topics.enabled</td><td>true</td><td>问题排行全局开关（私聊来源只看它）</td></tr>
+<tr><td>topics.scanMin</td><td>10</td><td>扫描间隔（分钟，1~1440）</td></tr>
+<tr><td>topics.windowMax</td><td>50</td><td>单批交给模型的消息数（5~200）</td></tr>
+<tr><td>topics.retentionDays</td><td>90</td><td>归类记录保留天数（1~365）</td></tr>
+<tr><td>groups.policies</td><td>[]</td><td>按群设置，见 4.6</td></tr>
+<tr><td>joinReview.rejectReason</td><td>未查到该 ID,请在控制台·个人设置复制用户 ID 后重新申请</td><td>QQ 展示给被拒绝的申请人</td></tr>
+</tbody>
+</table>
+<p>代码常量：可答性判断超时 30 秒、核对接口超时 5 秒、TG 管理员缓存 10 分钟、主动回复记录保留 90 天、时间线至少保留 1 天；问题归类静置 2 分钟、冷启动回看 7 天、每来源每轮最多 5 批、交给模型的主题 40 个、本地并入候选 500 个、少于 3 字的消息不送模型、单次归类超时 3 分钟。</p>
+</main>
+</body>
+</html>

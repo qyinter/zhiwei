@@ -1,0 +1,281 @@
+/* 知微全局样式：令牌取自知微设计系统（docs/设计规范/知微设计系统.html）——
+   主色蓝 #0075FF、墨黑标题、Geist 字族、控件 8px / 卡片 16px 两档圆角，明暗双主题。 */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-crit: var(--crit);
+  --color-crit-soft: var(--crit-soft);
+  --color-accent-soft: var(--accent-soft);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  /* 对齐设计规范：卡片与对话框 16px */
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
+  --radius-4xl: 2rem;
+}
+
+/* 知微品牌设计令牌（对齐 知微设计系统.html：主色蓝 #0075ff + 墨黑标题） */
+@theme {
+  --color-auxiliary-blue: #0075ff;
+  --color-auxiliary-blue-light: #4d9bff;
+  --color-brand-primary: #0075ff;
+  --color-accent-lime: #d9f501;
+  --color-heading: #0c1220;
+  --color-text-secondary: #6d778b;
+  --color-text-body: #414a5c;
+}
+
+/* 亮色令牌 —— 取自 知微设计系统.html :root（冷灰带极淡蓝偏 + 主色蓝 #0075ff） */
+:root {
+  --background: #f4f7fc;
+  --foreground: #0c1220;
+  --card: #ffffff;
+  --card-foreground: #0c1220;
+  --popover: #ffffff;
+  --popover-foreground: #0c1220;
+  /* 主按钮 = 主色蓝，明暗一致（白字） */
+  --primary: #0075ff;
+  --primary-foreground: #ffffff;
+  --secondary: #eef2f9;
+  --secondary-foreground: #0c1220;
+  --muted: #eef2f9;
+  --muted-foreground: #6d778b;
+  --accent: #eef2f9;
+  --accent-foreground: #0c1220;
+  --destructive: #dc2626;
+  --border: #e1e7f1;
+  --input: #cdd6e6;
+  --ring: #0075ff;
+  --accent-soft: #e2edff;
+  --chart-1: #0075ff;
+  --chart-2: #4d9bff;
+  --chart-3: #16a34a;
+  --chart-4: #b7791f;
+  --chart-5: #6d778b;
+  /* 语义色（知微设计系统.html：只表状态，不作装饰） */
+  --ok: #16a34a;
+  --ok-soft: #dcf5e6;
+  --warn: #b7791f;
+  --warn-soft: #fbf0d9;
+  --crit: #dc2626;
+  --crit-soft: #fbe3e3;
+  /* 控件圆角 8px（rounded-lg = var(--radius)） */
+  --radius: 0.5rem;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0c1220;
+  --sidebar-primary: #0075ff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef2f9;
+  --sidebar-accent-foreground: #0c1220;
+  --sidebar-border: #e1e7f1;
+  --sidebar-ring: #0075ff;
+}
+
+/* 暗色令牌 —— 取自 知微设计系统.html dark 主题 */
+.dark {
+  --background: #0a0f18;
+  --foreground: #eef2f8;
+  --card: #121826;
+  --card-foreground: #eef2f8;
+  --popover: #121826;
+  --popover-foreground: #eef2f8;
+  /* 主按钮明暗一致，仍用主色蓝 + 白字 */
+  --primary: #0075ff;
+  --primary-foreground: #ffffff;
+  --secondary: #1a2132;
+  --secondary-foreground: #eef2f8;
+  --muted: #1a2132;
+  --muted-foreground: #8791a5;
+  --accent: #1a2132;
+  --accent-foreground: #eef2f8;
+  --destructive: #f87171;
+  --border: #263044;
+  --input: #34405a;
+  /* 暗色 focus/链接用亮蓝 */
+  --ring: #4d9bff;
+  --accent-soft: #14243f;
+  --chart-1: #4d9bff;
+  --chart-2: #0075ff;
+  --chart-3: #34d399;
+  --chart-4: #e2b44f;
+  --chart-5: #8791a5;
+  --ok: #34d399;
+  --ok-soft: #123524;
+  --warn: #e2b44f;
+  --warn-soft: #3a2e12;
+  --crit: #f87171;
+  --crit-soft: #3a1a1a;
+  --sidebar: #121826;
+  --sidebar-foreground: #eef2f8;
+  --sidebar-primary: #4d9bff;
+  --sidebar-primary-foreground: #0b1526;
+  --sidebar-accent: #1a2132;
+  --sidebar-accent-foreground: #eef2f8;
+  --sidebar-border: #263044;
+  --sidebar-ring: #4d9bff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* 骨架屏：微光扫过（比 opacity 脉动更清晰、观感更流畅） */
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--skeleton-base) 0%,
+    var(--skeleton-base) 35%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-base) 65%,
+    var(--skeleton-base) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+:root {
+  --skeleton-base: #e3e9f2;
+  --skeleton-highlight: #f4f7fb;
+}
+
+.dark {
+  --skeleton-base: #232b3d;
+  --skeleton-highlight: #303a50;
+}
+
+/* 降低动效偏好：停用扫过动画，保留底色 */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer {
+    animation: none;
+  }
+}
+
+/* 隐藏滚动条但保留滚动能力（弹窗/抽屉等内容区，避免细长滚动条破坏观感） */
+.scrollbar-none {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* 旧 Edge */
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none; /* Chrome / Safari */
+}
+
+/* 全局滚动条：细、圆角、低对比，悬停加深（Firefox 用 scrollbar-* 属性，
+   Chrome/Safari 用 ::-webkit-scrollbar；随明暗主题切换配色） */
+:root {
+  --scrollbar-thumb: #cbd5e4;
+  --scrollbar-thumb-hover: #a9b6cc;
+}
+.dark {
+  --scrollbar-thumb: #2f3a51;
+  --scrollbar-thumb-hover: #41506d;
+}
+
+/* 标准滚动条属性要打在**所有**元素上：Chrome 121+ 也支持了 scrollbar-width/
+   scrollbar-color，且设了它的元素会禁用 ::-webkit-scrollbar 自绘——只设在 html
+   会导致视口（标准 thin 渲染）与内部滚动容器（webkit 自绘）两套观感、粗细不一。
+   统一走标准 thin；下方 ::-webkit-* 规则只服务尚不支持 scrollbar-color 的 Safari */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+html {
+  /* 常驻预留滚动条槽位：弹层（Select/Dialog 等）锁滚动把滚动条藏掉时，
+     宽度不变，页面不抖；自家的 body overflow 锁（页头移动菜单/文档抽屉）同样受益 */
+  scrollbar-gutter: stable;
+}
+
+/* 视口不滚动的布局（控制台外壳 h-screen + 内部容器滚动，标记 data-fixed-viewport）：
+   html 上预留的滚动条槽位在这种页面只会剩一条空白带（内部滚动条在它左边，
+   看起来像双滚动条），取消预留。这类页面视口本无滚动条，弹层锁滚动也不会抖 */
+html:has([data-fixed-viewport]) {
+  scrollbar-gutter: auto;
+}
+
+/* Radix 系弹层内部的 react-remove-scroll 会在锁滚动时给 body 注入
+   margin-right: <滚动条宽> !important 来补偿被移除的滚动条——槽位已由
+   scrollbar-gutter 常驻预留，再补偿就反向抖一次。它的样式是运行时注入、
+   排在本文件之后，同选择器会被它压过，这里用 html 前缀抬高优先级抵消。 */
+html body[data-scroll-locked] {
+  margin-right: 0 !important;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+

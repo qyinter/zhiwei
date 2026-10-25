@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-002 初始化向导与认证详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-002 初始化向导与认证详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-002</td></tr>
+<tr><td>文档名称</td><td>初始化向导（首次启动配置）与管理员认证详细设计书</td></tr>
+<tr><td>版本</td><td>0.1</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/httpapi/server.go</code>（setup*）、<code>server/internal/httpapi/auth.go</code>、<code>server/internal/store/admin.go</code>、<code>server/cmd/zhiwei/main.go</code>（<code>newSetupCode</code>）、<code>web/src/app/setup/page.tsx</code>、<code>web/src/app/login/page.tsx</code>、<code>web/src/app/admin/layout.tsx</code>、<code>web/src/lib/api.ts</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版实装</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>让部署方只需提供一个数据库连接串就能启动服务，其余配置（管理员、品牌、大模型、渠道）在浏览器里一次完成并存入 PostgreSQL；完成后后台以用户名密码登录保护。</p>
+<h3>1.2 范围</h3>
+<p>初始化口令、五步向导、初始化提交的原子性；登录 / 登出 / 当前用户 / 改密；前端的分流与登录跳转。多管理员与角色不在一期范围。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-001（整体架构）、FA-DD-007（设置分区字段）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>初始化口令（setupCode）</td><td>未初始化时进程启动生成的 8 位数字，只打印在服务端日志，仅本次进程有效</td></tr>
+<tr><td>会话 token</td><td>32 字节随机数的 hex，放在 httpOnly cookie <code>zw_session</code>；库里只存 SHA-256</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>浏览器 → Next（rewrites）→ Go <code>/api/setup/*</code>、<code>/api/auth/*</code>。同源访问，cookie 不跨域。</p>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>密码 bcrypt（DefaultCost）；token <code>crypto/rand</code>；会话 TTL 14 天。</li>
+<li>登录限速：进程内按 IP 计数，连续失败 5 次锁 15 分钟。gin <code>TrustedProxies</code> 只信任回环地址（Next 反代）。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li><strong>为什么要口令</strong>：未初始化的实例谁先打开向导谁就是管理员。口令只出现在服务器日志里，能看到日志 ≈ 能管理这台服务器，不需要额外 env。</li>
+<li>口令每次启动重新生成；初始化完成后不再生成，<code>/api/setup/llm-test</code> 与 <code>/api/setup/complete</code> 永久返回 409。</li>
+<li>一期只有一个管理员（向导创建）。忘记密码需在库里删掉 <code>admin_users</code> 全部行并把 <code>system_settings.setup</code> 置为未完成后重启，重新走向导（二期提供 CLI 重置）。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>API</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>初始化状态</td><td><code>GET /api/setup/status</code></td></tr>
+<tr><td>F-02</td><td>向导内测试 LLM</td><td><code>POST /api/setup/llm-test</code>（头 <code>X-Setup-Code</code>）</td></tr>
+<tr><td>F-03</td><td>提交初始化</td><td><code>POST /api/setup/complete</code>（头 <code>X-Setup-Code</code>）</td></tr>
+<tr><td>F-04</td><td>登录</td><td><code>POST /api/auth/login</code></td></tr>
+<tr><td>F-05</td><td>登出</td><td><code>POST /api/auth/logout</code></td></tr>
+<tr><td>F-06</td><td>当前用户</td><td><code>GET /api/auth/me</code></td></tr>
+<tr><td>F-07</td><td>修改密码</td><td><code>POST /api/auth/password</code></td></tr>
+<tr><td>F-08</td><td>前端分流</td><td><code>/</code> → <code>/setup</code> 或 <code>/admin</code>；401 → <code>/login?redirect=</code></td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 向导步骤（F-03 前端）</h3>
+<table>
+<thead><tr><th>步骤</th><th>内容</th><th>本地校验</th></tr></thead>
+<tbody>
+<tr><td>1 初始化口令</td><td>说明口令来源（日志里的 <code>setupCode=…</code>）</td><td>8 位数字</td></tr>
+<tr><td>2 管理员账号</td><td>用户名（缺省 admin）、密码、确认</td><td>用户名 ≥3；密码 ≥8；两次一致</td></tr>
+<tr><td>3 品牌信息</td><td>名称、一句话简介、官网链接</td><td>名称必填</td></tr>
+<tr><td>4 大模型</td><td>预设（OpenAI / DeepSeek / 通义千问 / Anthropic）、协议、模型、Base URL、API Key、温度、最大输出、超时；「测试连接」</td><td>Base URL、Key、模型必填（不强制测试通过）</td></tr>
+<tr><td>5 接入渠道</td><td>QQ 机器人与 Telegram 表单（均可关闭跳过）；企业微信提示预留</td><td>启用时凭据必填</td></tr>
+</tbody>
+</table>
+<p>口令错误不会在第 1 步立即发现（口令只在提交接口校验），第 4 步「测试连接」或最终提交时才返回 403——避免给口令一个无代价的枚举接口。</p>
+<h3>4.2 提交初始化（F-03 服务端）</h3>
+<p>请求体：<code>{admin:{username,password}, brand, llm, qqbot, telegram}</code>。</p>
+<ol>
+<li>S-01 <code>requireSetupPending</code>：已完成 → 409；<code>X-Setup-Code</code> 不等于进程口令 → 403。</li>
+<li>S-02 用户名去空白后校验 3~32 字符、密码 8~72 字节（bcrypt 上限 72）；品牌名称非空。</li>
+<li>S-03 以 <code>settings.Defaults()</code> 为底覆盖提交的分区，<code>settings.Validate</code> 全量校验（规则见 FA-DD-007）。</li>
+<li>S-04 <code>store.CompleteSetup</code> 单事务：<code>LOCK TABLE admin_users IN EXCLUSIVE MODE</code> → 条件插入（<code>WHERE NOT EXISTS (SELECT 1 FROM admin_users)</code>）→ 写入全部分区 → 写 <code>setup={"completed":true}</code>。插入 0 行 → 409（两个浏览器同时提交只有一个成功）。</li>
+<li>S-05 重新 <code>Settings.Load</code> 并 <code>runtime.Apply</code>：此刻起渠道开始连接。</li>
+<li>S-06 前端提示后跳 <code>/login</code>。</li>
+</ol>
+<pre><code>sequenceDiagram
+  participant B as 浏览器
+  participant S as Go
+  participant DB as PG
+  B->>S: POST /api/setup/complete (X-Setup-Code)
+  S->>S: 口令 / 字段 / Validate
+  S->>DB: BEGIN; LOCK admin_users; INSERT … WHERE NOT EXISTS
+  S->>DB: UPSERT system_settings × N; setup.completed=true; COMMIT
+  S->>S: Settings.Load + runtime.Apply
+  S-->>B: {"completed":true}</code></pre>
+<h3>4.3 登录（F-04）</h3>
+<ol>
+<li>S-01 IP 已锁定 → 429。</li>
+<li>S-02 按用户名查；不存在时也对固定哑哈希跑一次 bcrypt，两种失败耗时一致，防按响应时间枚举用户名。</li>
+<li>S-03 记录成功 / 失败（成功清零）；失败 → 401。</li>
+<li>S-04 生成 token，<code>admin_sessions</code> 插入 SHA-256(token) + 过期时间，刷新 <code>last_login_at</code>，顺手删除过期会话。</li>
+<li>S-05 下发 cookie：<code>HttpOnly; SameSite=Lax; Path=/; Max-Age=14d</code>；请求为 TLS 或 <code>X-Forwarded-Proto: https</code> 时加 <code>Secure</code>。</li>
+</ol>
+<h3>4.4 鉴权中间件与改密（F-06/F-07）</h3>
+<ul>
+<li><code>requireAdmin</code>：无 cookie → 401 <code>未登录</code>；token 哈希查不到或过期 → 401 <code>登录已过期，请重新登录</code>。</li>
+<li>改密：校验原密码 → 新密码规则同初始化 → 更新哈希并<strong>删除该用户全部会话</strong>（含当前），前端跳登录页。</li>
+</ul>
+<h3>4.5 前端分流（F-08）</h3>
+<ul>
+<li><code>/</code>：查 setup 状态，未完成去 <code>/setup</code>，否则 <code>/admin</code>。</li>
+<li><code>/admin/*</code> 布局：先查 setup（未完成去向导），再 <code>GET /api/auth/me</code>；拿到用户前只渲染骨架屏。</li>
+<li><code>lib/api.ts</code>：任意请求 401（登录接口自身除外）→ 硬跳转 <code>/login?redirect=当前路径</code>，清空内存态；登录成功后只接受以 <code>/</code> 开头且不以 <code>//</code> 开头的 redirect（防开放重定向）。</li>
+</ul>
+<h3>4.6 异常系</h3>
+<ul>
+<li>E-01 口令错误：403，向导停留当前步，toast 提示。</li>
+<li>E-02 初始化后再访问 <code>/setup</code>：页面查到 completed 自动跳 <code>/login</code>；直接调接口 409。</li>
+<li>E-03 初始化提交成功但 Apply 时渠道连接失败：不影响初始化结果，渠道状态在总览显示错误并后台重试。</li>
+</ul>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表.列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>admin_users.id</td><td>BIGSERIAL PK</td><td></td></tr>
+<tr><td>admin_users.username</td><td>VARCHAR(64) UNIQUE</td><td></td></tr>
+<tr><td>admin_users.password_hash</td><td>VARCHAR(255)</td><td>bcrypt</td></tr>
+<tr><td>admin_users.created_at / last_login_at</td><td>TIMESTAMPTZ</td><td>last_login_at 可空</td></tr>
+<tr><td>admin_sessions.token_hash</td><td>VARCHAR(64) PK</td><td>SHA-256 hex</td></tr>
+<tr><td>admin_sessions.user_id</td><td>BIGINT FK → admin_users ON DELETE CASCADE</td><td></td></tr>
+<tr><td>admin_sessions.expires_at</td><td>TIMESTAMPTZ（索引）</td><td>创建时 + 14 天</td></tr>
+</tbody>
+</table>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>setup</code>：<code>{"completed": true, "completedAt": "…"}</code>。仅由 <code>CompleteSetup</code> 写入；<code>PUT /api/settings</code> 忽略该分区。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message</th><th>场景</th></tr></thead>
+<tbody>
+<tr><td>409</td><td>系统已完成初始化</td><td>setup 接口在初始化后调用 / 并发提交落败</td></tr>
+<tr><td>403</td><td>初始化口令错误（见服务端启动日志）</td><td>X-Setup-Code 不匹配</td></tr>
+<tr><td>400</td><td>用户名长度需在 3~32 个字符之间</td><td></td></tr>
+<tr><td>400</td><td>密码长度需在 8~72 位之间</td><td>初始化 / 改密</td></tr>
+<tr><td>400</td><td>请填写品牌名称</td><td></td></tr>
+<tr><td>502</td><td>上游返回 HTTP {状态}：{正文片段}</td><td>测试连接失败（FA-DD-004）</td></tr>
+<tr><td>429</td><td>登录失败次数过多，请 15 分钟后再试</td><td></td></tr>
+<tr><td>401</td><td>用户名或密码错误</td><td></td></tr>
+<tr><td>401</td><td>未登录 / 登录已过期，请重新登录</td><td>鉴权中间件</td></tr>
+<tr><td>400</td><td>原密码错误</td><td>改密</td></tr>
+</tbody>
+</table>
+
+<h2>7. 配置项</h2>
+<p>无 env。会话 TTL（14 天）、限速阈值（5 次 / 15 分钟）为代码常量（<code>auth.go</code>）。</p>
+</main>
+</body>
+</html>

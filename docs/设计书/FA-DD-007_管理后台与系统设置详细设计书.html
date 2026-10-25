@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-007 管理后台与系统设置详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-007 管理后台与系统设置详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-007</td></tr>
+<tr><td>文档名称</td><td>管理后台（总览 / 体验台 / 系统设置）与设置分区详细设计书</td></tr>
+<tr><td>版本</td><td>0.7</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/settings/settings.go</code>、<code>server/internal/runtime/runtime.go</code>、<code>server/internal/httpapi/server.go</code>（overview / settings / playground / message-images）、<code>server/internal/httpapi/usage.go</code>、<code>server/internal/store/usage.go</code>、<code>server/internal/logbuf/logbuf.go</code>、<code>server/cmd/zhiwei/main.go</code>、<code>web/src/app/admin/{layout,page}.tsx</code>、<code>web/src/app/admin/{settings,playground,usage,logs}/page.tsx</code>、<code>web/src/components/conversation-panel.tsx</code>、<code>web/src/components/{common,settings-forms}.tsx</code>、<code>web/src/app/globals.css</code>、<code>web/src/components/ui/*</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版实装：UI 令牌与基础组件按知微设计系统实现（知微设计系统.html + web/src/components/ui）</td></tr>
+<tr><td>0.2</td><td>2026-10-24</td><td>新增设置分区 welcome / joinReview / proactive / reflect 与对应设置页标签；后台导航新增「群运营」组（主动回复 / 反思沉淀 / 入群审核）</td></tr>
+<tr><td>0.3</td><td>2026-10-24</td><td>新增设置分区 embedding 与「向量检索」标签（含测试连接）；设置页支持 <code>?tab=</code> 直达分区</td></tr>
+<tr><td>0.4</td><td>2026-10-24</td><td>客服策略新增「回复使用 Markdown 排版」开关；体验台与会话记录按精简 Markdown 渲染机器人回复（<code>components/reply-markdown.tsx</code>，与服务端同一子集）</td></tr>
+<tr><td>0.5</td><td>2026-10-24</td><td>后台导航「配置」组新增「技能」（知识库之后），页面见 FA-DD-010 4.5</td></tr>
+<tr><td>0.6</td><td>2026-10-24</td><td>新增设置分区 modelCatalog 与「模型目录」标签（含测试连接与示例报价）；技能页内置工具 model_catalog 可直接启停</td></tr>
+<tr><td>0.7</td><td>2026-10-25</td><td>新增「用量统计」（4.7）、「运行日志」（4.8）页；导航运营组加「问题排行」「用量统计」、群运营组加「群管理」（FA-DD-008）；总览「今日」改按浏览器时区；体验台可上传 / 粘贴图片，会话抽屉显示客户图片；设置分区新增 topics / groups，客服策略新增「识别图片」；系统设置保存时不回写 groups；保存设置前克隆切片，校验失败不会改脏当前设置</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>提供一个管理后台：看运行状况、调试回答效果、修改全部配置且即时生效。</p>
+<h3>1.2 范围</h3>
+<p>后台外壳与导航、总览、体验台前端、系统设置（分区、校验、掩码、热装配）、UI 规范迁移。会话 / 人工队列 / 知识库页面见 FA-DD-005、FA-DD-006。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-001 ~ FA-DD-006；<code>docs/设计规范/知微设计系统.html</code>。</p>
+<h3>1.4 用语定义</h3>
+<p>见 FA-DD-001 1.4。</p>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>Next.js 页面全部为客户端组件（<code>"use client"</code>），数据经 <code>lib/api.ts</code> 同源请求 <code>/api/*</code>；Next 仅负责静态外壳与 rewrites，不做 SSR 取数（避免 Next 服务端再带 cookie 转发一次）。</p>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>Next.js 16 由官方 <code>create-next-app</code> 生成（App Router、src 目录、Tailwind v4、<code>cacheComponents</code>）；页面在构建期预渲染为静态外壳。</li>
+<li>UI 规范：<code>globals.css</code> 按知微设计系统（<code>docs/设计规范/知微设计系统.html</code>）定义令牌，含语义色令牌 <code>--ok / --warn / --crit</code> 及其 soft 底；<code>components/ui</code> 提供 button / card / input / select / switch / dialog / alert-dialog / sheet / table / badge / skeleton / sonner / segmented-tabs 等基础组件，Badge 含 ok / warn / crit / accent / neutral 变体。</li>
+<li>全局约定：加载态 <code>useDelayedLoading / useDelayedPending</code>（超过 200ms 才显示）；分页每页 20 条；数字输入本地 string 草稿、失焦解析。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li>设置整份读写：前端 GET 全部分区（密钥掩码）→ 本地编辑 → PUT 全部分区。服务端以当前值为底解码，未传的分区保持不变；<code>setup</code> 分区忽略。</li>
+<li>保存触发整套重装：已启用渠道会断开重连（QQ WS 会走一次 Identify），频繁保存会造成短暂离线。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>API / 页面</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>后台外壳</td><td><code>/admin/layout.tsx</code>：桌面侧栏 236px（运营 / 群运营 / 配置三组）、移动端抽屉、明暗切换、退出</td></tr>
+<tr><td>F-02</td><td>总览</td><td><code>GET /api/overview</code>；<code>/admin</code> 每 15 秒刷新</td></tr>
+<tr><td>F-03</td><td>读取设置</td><td><code>GET /api/settings</code>（掩码）</td></tr>
+<tr><td>F-04</td><td>保存设置</td><td><code>PUT /api/settings</code></td></tr>
+<tr><td>F-05</td><td>测试 LLM</td><td><code>POST /api/settings/llm-test</code></td></tr>
+<tr><td>F-06</td><td>体验台</td><td><code>/admin/playground</code> + <code>POST /api/playground</code>（FA-DD-004 4.9）</td></tr>
+<tr><td>F-07</td><td>用量统计</td><td><code>GET /api/usage?days=1|7|30&amp;tz=</code>；<code>/admin/usage</code></td></tr>
+<tr><td>F-08</td><td>运行日志</td><td><code>GET /api/logs?after=&amp;level=&amp;q=</code>；<code>/admin/logs</code></td></tr>
+<tr><td>F-09</td><td>客户图片</td><td><code>GET /api/message-images/:id</code>（会话抽屉缩略图，FA-DD-004 4.12）</td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 总览（F-02）</h3>
+<ul>
+<li>返回 <code>{stats, channels, llm:{protocol, model, error}, kbChunks, brand}</code>。</li>
+<li>stats：会话数（不含体验台）、待人工数、今日咨询 / 自动回复（不含体验台）、今日模型调用 / 失败、今日输入 / 输出 token、知识文档数。今日缓存命中 token。「今日」= 浏览器时区（<code>?tz=</code>，IANA 名，缺省 UTC）当日零点起——库的时区通常是 UTC，按库切日会让东八区的「今日」从早上 8 点开始。服务端内嵌 <code>time/tzdata</code>，精简镜像也能解析时区。</li>
+<li>「今日 Token」卡片显示缓存命中率，点击进入用量统计。</li>
+<li>channels 固定顺序 qqbot / telegram / wecom：已启用取适配器实时状态，未启用给占位。徽章：未启用 neutral、已连接 ok、有错误 crit、连接中 warn。</li>
+<li>LLM 未就绪时页面顶部显示 warn 横幅并链接到设置页。</li>
+</ul>
+<h3>4.2 保存设置（F-04）</h3>
+<ol>
+<li>S-01 以当前设置为底解码请求体（先克隆 <code>agent.chats</code>：encoding/json 解数组会就地覆写元素，否则校验失败也会改脏内存里的当前设置；<code>groups</code> 自带每次换新切片的 UnmarshalJSON）；请求体只带部分分区时其余分区不变；强制保留 <code>setup</code>；<code>Unmask</code>：仍含 <code>••••</code> 的密钥字段还原为旧值。</li>
+<li>S-02 <code>Validate</code>（第 6 章）；失败 400 返回首条错误。</li>
+<li>S-03 逐分区 <code>reflect.DeepEqual</code> 比较，只 UPSERT 有变化的分区。</li>
+<li>S-04 更新内存快照并广播 → <code>runtime.Apply</code>（FA-DD-001 4.3）。</li>
+<li>S-05 返回保存后的掩码设置，前端替换本地状态并 toast。</li>
+</ol>
+<h3>4.3 密钥掩码</h3>
+<p>掩码字段：<code>llm.apiKey</code>、<code>qqbot.appSecret</code>、<code>telegram.botToken</code>、<code>wecom.secret</code>、<code>wecom.encodingAesKey</code>、<code>embedding.apiKey</code>。规则：空 → 空；≤4 字符 → <code>••••</code>；否则 <code>••••</code> + 后 4 位。回写时只要包含 <code>••••</code> 即视为未修改。</p>
+<h3>4.4 设置页结构</h3>
+<p>分段标签：大模型（预设按钮 + 测试连接）/ 客服策略 / 向量检索（测试连接：返回耗时、维数与两组示例相似度）/ 群运营（主动回复、问题排行、入群欢迎、入群审核）/ 反思沉淀 / 品牌 / QQ 机器人 / Telegram / 企业微信（预留说明）/ 账号（改密）。表单组件与初始化向导共用（<code>settings-forms.tsx</code>），一处修改两处生效。页头一个主按钮「保存设置」（设计系统：一屏一个主按钮）。</p>
+<h3>4.5 体验台前端（F-06）</h3>
+<p>左侧对话（Enter 发送、Shift+Enter 换行、输入法组合中不触发），右侧「本轮详情」：模型、耗时、输入 / 输出 / 缓存命中 token、转人工提示、预检索命中（带分数）、工具调用（可展开结果）。「新对话」清空界面并让下一条以 <code>reset=true</code> 发送。输入框左侧可选图片，也可直接粘贴截图（最多 4 张、单张 10MB，前端读成 data URL 随请求发送）；回复下方标出「看了 N 张图」，上游拒收图片时标「模型拒收图片，已去图重试」。</p>
+<p>会话抽屉：客户消息带图片且图片未过期时，显示缩略图（点开看缩放后的原图），正文里的「[图片]」占位不再重复；图片 30 天后清理，占位留着说明发过图。</p>
+<h3>4.6 视觉规范落地要点</h3>
+<ul>
+<li>主色唯一：蓝 <code>#0075FF</code>（暗色 <code>#4D9BFF</code>）用于主按钮、链接、焦点、导航高亮；语义色只表状态。</li>
+<li>圆角两档：控件 8px（rounded-lg）、卡片 / 对话框 16px（rounded-2xl）；胶囊徽章全圆角。</li>
+<li>页标题 27px / 650 / −0.02em；kicker 用等宽小号大写；数据、ID、token、模型名用 Geist Mono + tabular-nums。</li>
+<li>品牌字标：「开」墨黑 +「元」品牌蓝 + 终端光标块（呼应设计系统 rail brand）。</li>
+</ul>
+<h3>4.7 用量统计（F-07）</h3>
+<ol>
+<li>S-01 时间窗：浏览器时区下 <code>days−1</code> 天前的零点至今（days 1~90，页面提供今日 / 近 7 天 / 近 30 天）。</li>
+<li>S-02 返回 <code>{from, days, usage:{totals, days[], byPurpose[], byModel[], tools[], errors[]}}</code>：每组累计调用、失败、输入 / 输出 / 缓存命中 / 缓存写入 token、图片数、平均耗时；按天分组用 <code>to_char(created_at AT TIME ZONE tz, 'YYYY-MM-DD')</code>；工具统计展开 <code>tool_names</code>，给出调用次数与涉及轮数；最近 20 次失败的时间、用途、模型、错误。</li>
+<li>S-03 页面：四张统计卡（模型调用与失败率、输入 token 与缓存写入 / 图片数、缓存命中率 = 命中 ÷ 输入、输出 token 与平均耗时）；多天时显示每日 token 柱状图（单序列、单色，补齐无调用的日子，悬停看当天调用数、输入、命中率、输出、失败数）；按用途、按模型两张表；工具表（使用率 = 涉及轮数 ÷ 客服回复与主动回复的轮数）；最近失败列表。</li>
+</ol>
+<h3>4.8 运行日志（F-08）</h3>
+<ol>
+<li>S-01 进程日志经 <code>logbuf.Handler</code> 包装：每条先进内存环形缓冲（2000 条），再交给原来的 stdout 文本 Handler。缓冲只在内存里，重启清空；完整日志仍以 stdout 为准。</li>
+<li>S-02 每条带进程内单调递增的 <code>seq</code>、时间、级别、消息与属性（含 <code>With</code> 预置的 <code>mod</code> 等，分组前缀用点连接）。</li>
+<li>S-03 接口按 <code>after</code>（只要 seq 更大的）、<code>level</code>（INFO / WARN / ERROR，及以上）、<code>q</code>（消息与属性键值的不区分大小写子串）过滤，每次最多 500 条，返回 <code>{list, latest, capacity}</code>。</li>
+<li>S-04 页面每 3 秒按 <code>after = latest</code> 增量拉取，前端最多留 2000 条、最新在上；可暂停刷新、清屏；切换级别或搜索词时从头重拉。错误行浅红底。</li>
+</ol>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>system_settings 列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>key</td><td>VARCHAR(64) PK</td><td>分区名</td></tr>
+<tr><td>value</td><td>JSONB</td><td>整段分区；读取时缺省值打底再覆盖，新增字段无需迁移</td></tr>
+<tr><td>updated_at</td><td>TIMESTAMPTZ</td><td></td></tr>
+</tbody>
+</table>
+<h3>5.2 设置分区（system_settings key）</h3>
+<table>
+<thead><tr><th>key</th><th>Go 类型</th><th>字段详见</th></tr></thead>
+<tbody>
+<tr><td>setup</td><td>settings.Setup</td><td>FA-DD-002</td></tr>
+<tr><td>brand</td><td>settings.Brand</td><td>FA-DD-004 第 7 章</td></tr>
+<tr><td>llm</td><td>settings.LLM</td><td>FA-DD-004 第 7 章</td></tr>
+<tr><td>agent</td><td>settings.Agent</td><td>FA-DD-004 / FA-DD-006 第 7 章</td></tr>
+<tr><td>channel.qqbot / channel.telegram / channel.wecom</td><td>settings.QQBot / Telegram / WeCom</td><td>FA-DD-003 第 7 章</td></tr>
+<tr><td>proactive / welcome / joinReview</td><td>settings.Proactive / Welcome / JoinReview</td><td>FA-DD-008 第 7 章</td></tr>
+<tr><td>reflect</td><td>settings.Reflect</td><td>FA-DD-009 第 7 章</td></tr>
+<tr><td>embedding</td><td>settings.Embedding（apiKey 掩码）</td><td>FA-DD-005 第 7 章</td></tr>
+<tr><td>modelCatalog</td><td>settings.ModelCatalog</td><td>FA-DD-004 第 7 章</td></tr>
+<tr><td>topics / groups</td><td>settings.Topics / Groups</td><td>FA-DD-008 第 7 章</td></tr>
+</tbody>
+</table>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message（Validate，照抄实现）</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>LLM 协议只支持 openai / anthropic</td></tr>
+<tr><td>400</td><td>LLM Base URL 必须以 http:// 或 https:// 开头</td></tr>
+<tr><td>400</td><td>LLM 最大输出 token 需在 64~32000 之间</td></tr>
+<tr><td>400</td><td>LLM 超时需在 5~600 秒之间</td></tr>
+<tr><td>400</td><td>历史消息上限需在 0~200 之间</td></tr>
+<tr><td>400</td><td>工具往返上限需在 1~20 之间</td></tr>
+<tr><td>400</td><td>单轮超时需在 10~600 秒之间</td></tr>
+<tr><td>400</td><td>单条回复字数上限为 0（不拆）或 ≥50</td></tr>
+<tr><td>400</td><td>预检索条数需在 1~20 之间</td></tr>
+<tr><td>400</td><td>QQ 机器人接入方式只支持 websocket / webhook</td></tr>
+<tr><td>400</td><td>启用 QQ 机器人需要填写 AppID 与 AppSecret</td></tr>
+<tr><td>400</td><td>启用 Telegram 需要填写 Bot Token</td></tr>
+<tr><td>400</td><td>企业微信渠道尚未开放，请保持关闭</td></tr>
+<tr><td>400</td><td>统计天数需在 1~90 之间</td></tr>
+<tr><td>400</td><td>时区参数无效</td></tr>
+<tr><td>400</td><td>日志级别只能是 INFO / WARN / ERROR</td></tr>
+<tr><td>400</td><td>群运营与反思沉淀的校验（入群审核接口与正则、主动回复与反思各数值区间）见 FA-DD-008 / FA-DD-009 第 6 章</td></tr>
+</tbody>
+</table>
+
+<h2>7. 配置项</h2>
+<p>全部分区字段与缺省值见 FA-DD-003 / FA-DD-004 / FA-DD-006 / FA-DD-008 / FA-DD-009 第 7 章；缺省值定义在 <code>settings.Defaults()</code>。</p>
+</main>
+</body>
+</html>

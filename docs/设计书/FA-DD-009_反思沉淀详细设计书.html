@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-009 反思沉淀详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-009 反思沉淀详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-009</td></tr>
+<tr><td>文档名称</td><td>反思沉淀（提炼 / 整理 / 升格）详细设计书</td></tr>
+<tr><td>版本</td><td>0.2</td></tr>
+<tr><td>作成日</td><td>2026-10-24</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/agent/reflect.go</code>、<code>server/internal/store/reflect.go</code>、<code>server/internal/store/kb.go</code>（EnabledKBChunks）、<code>server/internal/kb/kb.go</code>（Jaccard / NearlySame）、<code>server/internal/httpapi/groupops.go</code>（reflection*）、<code>web/src/app/admin/reflection/page.tsx</code>、测试 <code>flows_db_test.go</code>、<code>reflect_test.go</code>、<code>store_db_test.go</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-24</td><td>初版实装：提炼 / 整理 / 升格三个后台扫描器；判重用 BM25 + bigram Jaccard（不用向量），升格写知识库文档，审核用后台按钮</td></tr>
+<tr><td>0.2</td><td>2026-10-24</td><td>升格文档统一放在知识库「反思沉淀」目录；approved 条目随知识块一起向量化，开启向量检索后参与语义召回（FA-DD-005 v0.3）</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>群主 / 管理员在群里回答用户的内容本身就是最贴近实际的客服知识。反思沉淀把这些答复提炼成可复用 FAQ，立即进入机器人检索；定期合并近义条目，并把稳定、通用的条目升格为正式知识库文档。</p>
+<h3>1.2 范围</h3>
+<p>提炼扫描、判重、整理（近义合并）、升格评审、后台「反思沉淀」页的驳回 / 恢复 / 升格 / 立即整理 / 立即升格评审。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-008（群时间线、客服发言定义）、FA-DD-005（检索索引）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>沉淀条目</td><td><code>kb_reflections</code> 一行；<code>approved</code> 已入库（参与检索）/ <code>rejected</code> 已驳回 / <code>promoted</code> 已升格</td></tr>
+<tr><td>沉降区间</td><td><code>(游标, now − settleMin]</code>：只评估这段时间内的客服发言</td></tr>
+<tr><td>整理</td><td>把 approved 条目分批交给模型做近义合并，整批替换</td></tr>
+<tr><td>升格</td><td>把一条 approved 条目写成知识库文档（标题「升格沉淀 #id」），条目转为 promoted、不再单独检索</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>后台循环 <code>RunReflector</code> 每分钟醒一次：按 <code>scanMin</code> 执行提炼（与时间线清理）；整理、升格按各自周期检查是否到期（上次执行时间记在 <code>poller_cursors</code> 的 <code>reflect_compact_at / reflect_promote_at</code>，重启不丢）。提炼、整理、升格以及后台手动触发由同一把锁串行化。</p>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>三处模型调用都走 <code>askJSON</code>（FA-DD-008 2.2），超时 3 分钟；system 为固定提示词，聊天记录 / 已有知识 / 候选以 JSONL 放在 user 侧，所有字符串先剥伪造定界符。</li>
+<li>已有知识检索与判重用内存 BM25 索引：沉淀条目（approved）与文档块一起进入索引，来源名「人工沉淀」，命中结果带 <code>reflectionId</code>。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li>素材只来自群时间线，QQ 需开启全量群消息（FA-DD-008 2.3）；否则时间线只有 @ 消息，群主的答复几乎进不来。</li>
+<li>判重不用向量，用 <code>NearlySame</code>（规范化相等、互相包含且都 ≥8 字、或 Jaccard ≥ 0.72）或与检索前 5 名的 bigram Jaccard ≥ 0.5；同义改写可能漏判，由整理环节兜底合并。</li>
+<li>沉淀通知不推送到群（无管理面），统一在后台审核。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>API</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>提炼扫描</td><td>后台循环，每 <code>scanMin</code> 分钟</td></tr>
+<tr><td>F-02</td><td>整理</td><td>每 <code>compactHours</code> 小时；<code>POST /api/reflection/run/compact</code></td></tr>
+<tr><td>F-03</td><td>升格评审</td><td>每 <code>promoteHours</code> 小时；<code>POST /api/reflection/run/promote</code></td></tr>
+<tr><td>F-04</td><td>反思页数据</td><td><code>GET /api/reflection?status=</code>（条目最多 200 条）</td></tr>
+<tr><td>F-05</td><td>单条操作</td><td><code>PATCH /api/reflection/:id {action: approve|reject|promote}</code></td></tr>
+<tr><td>F-06</td><td>整理记录详情</td><td><code>GET /api/reflection/compactions/:id</code></td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 提炼（F-01）</h3>
+<ol>
+<li>S-01 对时间线里每个在白名单内的群：<code>until = now − settleMin</code>；无游标时游标取 <code>now − lookbackMin</code>；<code>until ≤ 游标</code> → 跳过。</li>
+<li>S-02 <code>(游标, until]</code> 内没有客服发言 → 不调模型，游标推进到 until。</li>
+<li>S-03 窗口：游标前 10 条作上下文 + <code>(游标, now]</code> 内最多 <code>windowMax</code> 条（上界用 now，把区间后的追问 / 致谢也带上，作为答复有效的证据）。</li>
+<li>S-04 转成 JSONL <code>{ts, role:"客服"|"用户", userId, text}</code>；以窗口里 ≥4 字的消息为探针检索已有知识（全文前 2000 字 + 前 5 条各一次），合并去重取得分最高 6 条。</li>
+<li>S-05 调模型：只评估沉降区间内的客服发言是否有效回答了相邻问题；排除闲聊、猜测、隐私凭据、价格 / 倍率 / 可用性 / 公告 / 故障等时变事实；已被覆盖的不输出。返回 <code>{"items":[{question, answer, effective, faq}]}</code>。</li>
+<li>S-06 解析失败或调用出错 → 游标不前进，下一轮重试。</li>
+<li>S-07 对 <code>effective=true</code> 且 faq 非空的条目判重（2.3），不重复则写入 approved 并立即重建索引（同批后续条目的判重能看到它）。</li>
+<li>S-08 游标推进到 until。</li>
+</ol>
+<h3>4.2 整理（F-02）</h3>
+<ol>
+<li>S-01 approved 条目数 &lt; <code>compactMinEntries</code> → 不整理。</li>
+<li>S-02 按 id 升序每 30 条一批，不足 2 条的批次跳过。</li>
+<li>S-03 每批以条目为探针检索正式文档（不含沉淀条目）作冲突参照，调模型（提示词要点：激进近义合并、不得缩短、不得因文档已覆盖而删除、不得新增事实），返回 <code>{"items":[{faq}]}</code>。</li>
+<li>S-04 安全底线：结果非空；不超过输入 ×1.5；不少于 max(1, ⌈输入 ×0.4⌉)。不满足或调用失败 → 该批保持原样。</li>
+<li>S-05 只替换成功的批次：单事务删除这些条目、插入合并结果（<code>compacted=true</code>，无来源群与来源问答），并记一条 <code>reflect_compactions</code>（前后快照）。全部批次失败 → 报错，不改库。</li>
+<li>S-06 重建索引。无论结果如何都记下本次整理时间。</li>
+</ol>
+<h3>4.3 升格（F-03 / F-05）</h3>
+<ol>
+<li>S-01 取最近 60 条 approved 条目为候选；不足 <code>promoteMinEntries</code> → 不评审。</li>
+<li>S-02 调模型（提示词偏保守，时变事实一律 false），返回 <code>{"decisions":[{id, promote, reason}]}</code>。</li>
+<li>S-03 只采纳候选内的 id、去重、最多 <code>promoteMaxPerRun</code> 条。</li>
+<li>S-04 逐条升格：单事务锁定条目（必须仍为 approved）→ 在知识库「反思沉淀」目录下新建文档「升格沉淀 #id」并切块 → 条目标 promoted、记 <code>promoted_doc_id</code>；重建索引。</li>
+<li>后台单条「升格为正式文档」走同一 S-04。</li>
+</ol>
+<h3>4.4 后台页（F-04）</h3>
+<ul>
+<li>配置与计数徽章：扫描周期、静置等待、整理周期、升格周期、已入库、可整理 / 门槛、已升格、已驳回。</li>
+<li>每群反思进度：缓冲消息、上次扫描、滞后（<code>now − settle − 游标</code>）、已沉淀条数；上次整理 / 升格评审时间。</li>
+<li>知识条目：按状态筛选；approved 可「升格为正式文档」「驳回」，rejected 可「恢复入库」，promoted 显示对应文档；可展开来源问答。</li>
+<li>「立即整理」需确认对话框；「立即整理」在已入库 &lt; 门槛时禁用，「立即升格评审」在已入库 &lt; 升格最少候选时禁用。</li>
+<li>整理记录：最近 10 次，展开查看整理前后全文。</li>
+</ul>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表.列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>kb_reflections.channel / chat_id</td><td>VARCHAR</td><td>来源群；整理产生的条目为空</td></tr>
+<tr><td>kb_reflections.question / answer</td><td>TEXT</td><td>来源问答要点</td></tr>
+<tr><td>kb_reflections.faq</td><td>TEXT</td><td>检索正文</td></tr>
+<tr><td>kb_reflections.status</td><td>VARCHAR(16) DEFAULT 'approved'</td><td>approved / rejected / promoted；索引 (status, created_at DESC)</td></tr>
+<tr><td>kb_reflections.compacted</td><td>BOOLEAN</td><td>整理合并产生</td></tr>
+<tr><td>kb_reflections.promoted_doc_id</td><td>BIGINT FK SET NULL</td><td>升格生成的文档</td></tr>
+<tr><td>reflect_compactions.before_count / after_count</td><td>INT</td><td></td></tr>
+<tr><td>reflect_compactions.before_json / after_json</td><td>JSONB</td><td>整理前 <code>[{id, faq}]</code> / 整理后 <code>[faq]</code></td></tr>
+</tbody>
+</table>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>reflect</code>（字段见第 7 章）。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>action 只能是 approve / reject / promote</td></tr>
+<tr><td>409</td><td>条目不存在或已驳回、已升格、已被整理合并</td></tr>
+<tr><td>502</td><td>LLM 未配置 / 全部 {n} 批整理失败 / 模型未输出 JSON：… / 解析模型 JSON 失败：…</td></tr>
+<tr><td>400</td><td>反思扫描间隔需在 1~1440 分钟之间（及 Validate 中其余 8 条区间校验，见 <code>settings.Validate</code>）</td></tr>
+</tbody>
+</table>
+<p>手动触发的结果文案：「{前} → {后} 条（共 n 批[，m 批失败保持原样]）」「条目不足 N 条，未整理」「评审 n 条，升格 #id → 文档 #id…」「评审 n 条，无升格」「候选不足 N 条，未评审」。</p>
+
+<h2>7. 配置项</h2>
+<table>
+<thead><tr><th>键</th><th>缺省</th><th>范围</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>reflect.enabled</td><td>true</td><td></td><td>只在区间内有客服发言时才调模型</td></tr>
+<tr><td>reflect.scanMin</td><td>5</td><td>1~1440</td><td>扫描间隔（分钟）</td></tr>
+<tr><td>reflect.lookbackMin</td><td>120</td><td>10~10080</td><td>首次扫描回看范围；时间线保留 = 回看 + 静置（至少 1 天）</td></tr>
+<tr><td>reflect.settleMin</td><td>10</td><td>0~1440</td><td>静置阈值（分钟）</td></tr>
+<tr><td>reflect.windowMax</td><td>60</td><td>5~500</td><td>单窗最大消息数</td></tr>
+<tr><td>reflect.compactHours</td><td>1</td><td>0~720</td><td>整理周期，0 关闭</td></tr>
+<tr><td>reflect.compactMinEntries</td><td>10</td><td>2~1000</td><td>整理最少条目</td></tr>
+<tr><td>reflect.promoteHours</td><td>24</td><td>0~720</td><td>升格评审周期，0 关闭</td></tr>
+<tr><td>reflect.promoteMinEntries</td><td>1</td><td>1~1000</td><td>升格最少候选</td></tr>
+<tr><td>reflect.promoteMaxPerRun</td><td>5</td><td>1~50</td><td>单轮最多升格</td></tr>
+</tbody>
+</table>
+<p>代码常量（<code>reflect.go</code>）：区间前上下文 10 条、已有知识 6 条、判重 Jaccard 0.5、整理每批 30 条、整理底线 ×0.4 / ×1.5、升格候选上限 60、单次调用超时 3 分钟。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-005 知识库详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-005 知识库详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-005</td></tr>
+<tr><td>文档名称</td><td>知识库（目录 + 批量导入 + 切块 + 关键词 / 向量混合检索）详细设计书</td></tr>
+<tr><td>版本</td><td>0.3</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/kb/kb.go</code>、<code>server/internal/embed/embed.go</code>、<code>server/internal/store/kb.go</code>、<code>server/internal/httpapi/kb.go</code>、<code>web/src/app/admin/kb/page.tsx</code>、<code>web/src/components/kb-import.tsx</code>、<code>docker-compose.yml</code>（embed 服务）、测试 <code>kb_test.go</code> / <code>index_db_test.go</code> / <code>store_db_test.go</code> / <code>httpapi/kb_test.go</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版实装：PG 存文档 + 进程内 BM25</td></tr>
+<tr><td>0.2</td><td>2026-10-24</td><td>索引纳入反思沉淀条目；新增 Jaccard / NearlySame 文本相似度（沉淀判重）</td></tr>
+<tr><td>0.3</td><td>2026-10-24</td><td>文档目录（多级路径）与目录改名 / 移动；批量导入（多文件、文件夹、zip，UTF-8 / GBK）；向量检索：外部嵌入服务（缺省 TEI + bge-small-zh-v1.5，docker-compose 的 embed 服务）+ 向量存 PG <code>REAL[]</code> + 进程内余弦，与 BM25 按 RRF 融合；后台向量化任务；新增设置分区 embedding</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>为客服回答提供依据：管理员在后台按目录维护 Markdown 文档（可从本地批量导入），保存即切块并重建检索索引；Agent 通过预检索与 <code>kb_search</code> 工具使用（FA-DD-004）。检索同时走关键词与语义两路，换个说法的提问也能命中。</p>
+<h3>1.2 范围</h3>
+<p>文档 CRUD、启停、目录、批量导入、切块规则、分词与打分、向量化与混合检索、检索测试。反思沉淀条目（approved）与文档块一起进入检索（FA-DD-009）。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-004（预检索与工具）、FA-DD-007（设置页「向量检索」标签）、FA-DD-009（沉淀条目与升格文档）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>块（chunk）</td><td>检索粒度：≤500 字的正文片段，带所属文档标题与最近的 Markdown 标题</td></tr>
+<tr><td>目录（path）</td><td>文档所在目录，「/」分隔的多级路径，如「计费/退款」；空串为根目录。目录不单独建表，由文档的 path 推导</td></tr>
+<tr><td>bigram</td><td>中文连续汉字的相邻二字组，如「怎么充值」→ 怎么 / 么充 / 充值</td></tr>
+<tr><td>嵌入服务</td><td>把文本转成向量的 HTTP 服务，接口为 OpenAI 兼容的 <code>POST {baseUrl}/embeddings</code></td></tr>
+<tr><td>RRF</td><td>倒数排名融合：每路结果按名次记 1/(60+名次)，同一块的两路得分相加后排序</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>PG（kb_documents / kb_chunks，以及 kb_reflections 中 approved 的沉淀条目，来源名「人工沉淀」）为唯一事实源，向量也存在这两张表的 <code>embedding</code> 列里。<code>kb.Index</code> 是启用文档全部块的内存快照（含当前模型的向量），启动时与每次增删改后整体重建，检索期间用读锁、重建完成后原子替换。</p>
+<p>向量由外部嵌入服务生成。缺省部署为 docker-compose 的 <code>embed</code> 服务：HuggingFace text-embeddings-inference + <code>BAAI/bge-small-zh-v1.5</code>（512 维），仅监听 <code>127.0.0.1:8081</code>。</p>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>关键词：纯 Go BM25（k1=1.2，b=0.75），中文 bigram + ASCII 词。</li>
+<li>向量：<code>internal/embed</code> 调 <code>/embeddings</code>，结果归一化为单位向量；余弦相似度 = 点积，进程内全量计算。</li>
+<li>不依赖 pgvector：向量存 <code>REAL[]</code>，客服知识库通常几十到几千块，全量点积毫秒级。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li>为什么嵌入模型单独部署而不嵌进 Go 进程：Go 跑 ONNX 模型只能走 onnxruntime 的 CGO 绑定 + 自带分词器，会破坏纯 Go 单二进制与交叉编译。独立服务实测（arm64，bge-small-zh-v1.5）：常驻内存约 175MB、空闲 CPU ≈0、单条约 20ms、镜像 342MB，秒级就绪。</li>
+<li>嵌入服务可选：未开启或不可用时检索自动退回纯关键词，行为与 v0.2 一致。</li>
+<li>单篇文档 ≤2MB；标题 ≤200 字；目录路径 ≤255 字；单次导入 ≤50MB、≤1000 篇。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>API</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>文档列表 + 向量化状态</td><td><code>GET /api/kb</code> → <code>{list, embedding}</code>（list 不含正文，按 path, title 排序，带块数）</td></tr>
+<tr><td>F-02</td><td>文档详情</td><td><code>GET /api/kb/:id</code></td></tr>
+<tr><td>F-03</td><td>新建 / 保存</td><td><code>POST /api/kb</code>、<code>PUT /api/kb/:id</code> <code>{path, title, content, enabled}</code></td></tr>
+<tr><td>F-04</td><td>删除</td><td><code>DELETE /api/kb/:id</code></td></tr>
+<tr><td>F-05</td><td>检索测试</td><td><code>POST /api/kb/search {query, topK}</code></td></tr>
+<tr><td>F-06</td><td>目录改名 / 移动</td><td><code>POST /api/kb/folders/rename {from, to}</code> → <code>{documents}</code></td></tr>
+<tr><td>F-07</td><td>批量导入</td><td><code>POST /api/kb/import</code>（multipart）→ <code>{created, updated, skipped, ignored[]}</code></td></tr>
+<tr><td>F-08</td><td>嵌入服务测试</td><td><code>POST /api/settings/embedding-test</code>（设置草稿）→ <code>{latencyMs, dims, related, unrelated}</code></td></tr>
+<tr><td>F-09</td><td>后台向量化</td><td>常驻任务 <code>Index.RunEmbedder</code></td></tr>
+<tr><td>F-10</td><td>后台页面</td><td><code>/admin/kb</code>：页头状态标签与「检索测试」「批量导入」「新建文档」按钮，左侧目录树、右侧编辑器（两栏铺满一屏、各自滚动）；检索测试与批量导入为对话框</td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 保存（F-03）</h3>
+<ol>
+<li>S-01 path 规范化（<code>CleanKBPath</code>：<code>\</code> 统一为 <code>/</code>，每段去首尾空白，去空段）；校验标题非空且 ≤200 字、路径 ≤255 字、正文 ≤2MB；enabled 缺省 true。</li>
+<li>S-02 <code>kb.Split</code> 切块（4.2）。</li>
+<li>S-03 单事务：新建 INSERT / 更新 UPDATE（不存在 404）→ 删除该文档旧块 → COPY 批量插入新块（新块 embedding 为空）。</li>
+<li>S-04 重建内存索引并唤醒向量化任务；返回文档（含 chunkCount），前端 toast「已保存，切分为 N 个检索块」。</li>
+</ol>
+<h3>4.2 切块规则</h3>
+<ul>
+<li>按空行分段；以 <code>#</code> 开头的段视为标题：先结束当前块，标题文字成为后续块的 heading（标题行之后的同段文字归入正文）。</li>
+<li>段落累加到当前块，超过 500 字前先结束当前块。</li>
+<li>单段超 500 字：在后半段（250~500 字之间）找 <code>。！？!?；;</code> 或换行切，找不到则 500 字硬切。</li>
+<li>空文档：以标题作为唯一块（保证文档可被标题检索到）。</li>
+</ul>
+<h3>4.3 目录（F-06）</h3>
+<ul>
+<li>目录树由前端按文档 path 组装：每级显示文档总数，可折叠；筛选框按「目录/标题」子串过滤（筛选时全部展开）。目录行悬停（触屏常显）出现：在此目录新建文档、导入到此目录、改名 / 移动。</li>
+<li>改名 / 移动：<code>from</code> 目录及其所有子目录整体换前缀到 <code>to</code>（<code>to</code> 为空 = 移到根目录，与已有目录同名即合并）。单条 UPDATE：<code>path = from</code> 改为 <code>to</code>，<code>path</code> 以 <code>from/</code> 开头的替换前缀。</li>
+<li>目录不参与向量化文本，改名不需要重新向量化；BM25 索引文本包含目录，按目录名检索可命中。</li>
+<li>反思沉淀升格的文档统一放在「反思沉淀」目录（FA-DD-009）。</li>
+</ul>
+<h3>4.4 批量导入（F-07）</h3>
+<ol>
+<li>I-01 请求：multipart 字段 <code>files</code>（可多个）、<code>paths</code>（与 files 一一对应的相对路径；浏览器选文件夹时为 <code>webkitRelativePath</code>，因 Go 解析 multipart 文件名会去掉目录）、<code>prefix</code>（导入到哪个目录下）、<code>mode</code>（<code>overwrite</code> 缺省 / <code>skip</code>）。请求体上限 50MB。</li>
+<li>I-02 <code>.zip</code> 在服务端展开（不落盘），条目按同样规则处理。zip 文件名合法 UTF-8 原样使用，否则按 GBK 解码（Windows 资源管理器打的包）。</li>
+<li>I-03 逐个文件：路径段以 <code>.</code> 开头或为 <code>__MACOSX</code> 的静默跳过；只收 <code>.md / .markdown / .txt</code>；正文去 UTF-8 BOM，不是 UTF-8 时按 GBK 再试（解出替换符视为失败）。</li>
+<li>I-04 文件所在子目录拼在 prefix 后成为文档目录，文件名去扩展名成为标题；同一批里目录 + 标题重复的，后出现的为准。</li>
+<li>I-05 单事务写入：同目录同标题已存在时，overwrite 覆盖正文（保留启用状态）、skip 跳过；否则新建（启用）。</li>
+<li>I-06 重建索引并唤醒向量化。未导入的文件与原因在 <code>ignored</code> 里返回，前端列表展示。</li>
+</ol>
+<p>前端在提交前展示每个文件的最终「目录 / 标题」预览与总大小（超 50MB 禁止提交）；zip 只显示压缩包本身。</p>
+<h3>4.5 分词与关键词打分</h3>
+<ul>
+<li>分词：汉字段 → bigram（单字段出单字）；字母数字及 <code>_ - .</code> 组成的词 → 小写整词；其余字符为分隔。例：<code>API Key 怎么充值?</code> → <code>api | key | 怎么 | 么充 | 充值</code>。</li>
+<li>每块的索引文本 = 目录 + 文档标题 + 小节标题 + 正文。</li>
+<li>BM25：Σ idf(t) · f·(k1+1) / (f + k1·(1 − b + b·len/avgLen))，idf = ln(1 + (N − df + 0.5)/(df + 0.5))，查询词去重。</li>
+<li>相对阈值：低于最高分 30% 的结果丢弃——避免只撞上一个常见二字组（如「价格」）的块被塞给模型。</li>
+</ul>
+<h3>4.6 向量化（F-09）</h3>
+<ul>
+<li>向量化文本：块 = 文档标题 + 小节标题 + 正文（换行连接）；沉淀条目 = FAQ 文本。单条超过 2000 字先截断，TEI 以 <code>--auto-truncate</code> 按模型上限（512 token）再截。</li>
+<li>待处理 = 启用文档的块与 approved 沉淀条目中，<code>embedding</code> 为空或 <code>embed_model</code> ≠ 当前模型名的行。模型名即向量版本：设置里改模型，全部重算。</li>
+<li>任务被唤醒（保存 / 删除 / 导入 / 改名 / 沉淀变更后的重建、设置切换模型）或每分钟一次：每批 32 条送嵌入服务，按 id 回填 <code>embedding, embed_model</code>（期间被删除或重切的块匹配不上，自然跳过）；本轮有回填则重建快照。</li>
+<li>嵌入服务出错：本轮放弃，下轮重试；错误记入状态（F-01 的 <code>embedding.lastError</code>），首次出错与恢复各记一条日志。</li>
+</ul>
+<h3>4.7 混合检索（F-05 / Agent 共用）</h3>
+<ol>
+<li>H-01 若开启向量检索且快照里已有向量：向量化问句（超时 3 秒）。失败则记错误、本次只走关键词。</li>
+<li>H-02 关键词一路：BM25 排序 + 30% 相对阈值（4.5）。</li>
+<li>H-03 向量一路：与每个维度一致的块向量做点积，≥ <code>embedding.minScore</code>（缺省 0.5）的按相似度排序。</li>
+<li>H-04 只有关键词一路时 <code>score</code> = BM25 分（与 v0.2 完全一致）；两路都有时按 RRF（k=60）融合，<code>score</code> = 融合分。每条结果另带 <code>keyword</code>（BM25 分）与 <code>vector</code>（余弦），未命中该路为 0。</li>
+<li>H-05 截取 topK（检索测试缺省 5，上限 20；Agent 用 <code>agent.kbTopK</code>）。给模型的来源写作「目录/标题 / 小节」。</li>
+</ol>
+<p>实测（bge-small-zh-v1.5）：「怎么充钱」对「充值方法…」0.71、对「API Key…」0.22；「钱能退吗」对「退款…」0.65；「今天天气怎么样」「你们是做什么的」在 0.5 下限下无召回。</p>
+<h3>4.8 后台页面（F-10）</h3>
+<ul>
+<li>状态条：未开启向量检索时提示「当前只按关键词检索…」并链接到 <code>/admin/settings?tab=embedding</code>；开启后显示模型名与「已向量化 x / y 块」，未完成时显示进度条并每 3 秒静默刷新；嵌入服务异常时红字显示原因。</li>
+<li>编辑器：目录输入框（候选为已有目录）+ 标题。</li>
+<li>检索测试（对话框）：结果显示「目录/标题 / 小节」、「关键词 x」「语义 x」两个徽章与正文前 4 行；点结果关闭对话框并打开对应文档（沉淀条目不可点）。</li>
+</ul>
+<h3>4.9 停用与删除（F-03/F-04）</h3>
+<p>停用的文档保留内容、块与向量，但不进入索引、不参与向量化；删除级联删除块。两者都触发索引重建。</p>
+<h3>4.10 异常系</h3>
+<ul>
+<li>E-01 索引重建失败（DB 异常）：记 error 日志，继续使用旧索引；保存接口仍返回成功（数据已落库，下次重建自愈）。</li>
+<li>E-02 嵌入服务不可用：检索退回关键词，向量化下轮重试（4.6）；已有向量保留，服务恢复后自动重新参与。</li>
+</ul>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表.列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>kb_documents.id</td><td>BIGSERIAL PK</td><td></td></tr>
+<tr><td>kb_documents.path</td><td>TEXT DEFAULT ''</td><td>目录，索引 (path, title)</td></tr>
+<tr><td>kb_documents.title</td><td>VARCHAR(255)</td><td>接口限 200 字</td></tr>
+<tr><td>kb_documents.content</td><td>TEXT</td><td>Markdown 原文</td></tr>
+<tr><td>kb_documents.enabled</td><td>BOOLEAN DEFAULT true</td><td></td></tr>
+<tr><td>kb_documents.created_at / updated_at</td><td>TIMESTAMPTZ</td><td></td></tr>
+<tr><td>kb_chunks.id</td><td>BIGSERIAL PK</td><td></td></tr>
+<tr><td>kb_chunks.document_id</td><td>BIGINT FK ON DELETE CASCADE</td><td>索引 (document_id, ord)</td></tr>
+<tr><td>kb_chunks.ord</td><td>INT</td><td>文档内序号</td></tr>
+<tr><td>kb_chunks.heading / content</td><td>TEXT</td><td></td></tr>
+<tr><td>kb_chunks.embedding</td><td>REAL[] NULL</td><td>单位向量；空 = 未向量化</td></tr>
+<tr><td>kb_chunks.embed_model</td><td>TEXT DEFAULT ''</td><td>生成该向量的模型名</td></tr>
+<tr><td>kb_reflections.embedding / embed_model</td><td>同上</td><td>沉淀条目的向量（FA-DD-009）</td></tr>
+</tbody>
+</table>
+<p>迁移：<code>20261024100000_kb_path_embedding.sql</code>。</p>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>embedding</code>（<code>settings.Embedding</code>），见第 7 章。另有 <code>agent.kbPrefetch / agent.kbTopK</code> 见 FA-DD-004。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>标题不能为空且不超过 200 字</td></tr>
+<tr><td>400</td><td>目录路径不超过 255 字</td></tr>
+<tr><td>400</td><td>单篇文档不超过 2MB</td></tr>
+<tr><td>400</td><td>请选择要改名的目录</td></tr>
+<tr><td>400</td><td>上传失败：单次导入不超过 50MB</td></tr>
+<tr><td>400</td><td>没有可导入的文档（附 <code>ignored</code>）</td></tr>
+<tr><td>400</td><td>单次最多导入 1000 篇文档，请分批导入</td></tr>
+<tr><td>400</td><td>嵌入服务地址需以 http:// 或 https:// 开头（测试接口）</td></tr>
+<tr><td>400</td><td>开启向量检索需要填写以 http:// 或 https:// 开头的嵌入服务地址 / 开启向量检索需要填写嵌入模型名 / 向量相似度下限需在 0~1 之间（保存设置）</td></tr>
+<tr><td>502</td><td>嵌入服务返回 HTTP {code}：{body} / 嵌入服务返回无法解析：{body} / 嵌入服务返回 {n} 条向量，期望 {m} 条（测试接口）</td></tr>
+<tr><td>404</td><td>记录不存在</td></tr>
+</tbody>
+</table>
+<p>导入时单个文件的 ignored 原因：不支持的格式（只导入 .md / .markdown / .txt）、无法识别的文本编码（请存为 UTF-8）、空文件、单篇文档不超过 2MB、标题 / 路径超长、读取失败、解压失败、不是有效的 zip 压缩包。</p>
+
+<h2>7. 配置项</h2>
+<table>
+<thead><tr><th>键</th><th>缺省</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>embedding.enabled</td><td>false</td><td>开启向量检索</td></tr>
+<tr><td>embedding.baseUrl</td><td>http://127.0.0.1:8081/v1</td><td>OpenAI 兼容嵌入接口，填到 /v1；知微跑在容器里时用服务名，如 http://embed/v1</td></tr>
+<tr><td>embedding.apiKey</td><td>空</td><td>云端服务用；回显为掩码</td></tr>
+<tr><td>embedding.model</td><td>BAAI/bge-small-zh-v1.5</td><td>同时是向量版本标记，改了全部重算</td></tr>
+<tr><td>embedding.minScore</td><td>0.5</td><td>向量召回的余弦下限，0~1</td></tr>
+</tbody>
+</table>
+<p>代码常量（<code>kb.go</code>）：切块上限 500 字、BM25 参数、30% 相对阈值、RRF k=60、问句向量化超时 3 秒、向量化批量 32、兜底轮询 1 分钟。</p>
+<p>部署（<code>docker-compose.yml</code>）：<code>docker compose up -d embed</code>；x86_64 用缺省镜像 <code>text-embeddings-inference:cpu-1.8</code>，Apple Silicon / ARM 设 <code>TEI_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest</code>；国内网络可设 <code>HF_ENDPOINT=https://hf-mirror.com</code>。模型缓存在 <code>tei</code> 卷。</p>
+</main>
+</body>
+</html>

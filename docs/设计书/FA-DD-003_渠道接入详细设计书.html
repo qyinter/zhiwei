@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-003 渠道接入详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-003 渠道接入详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-003</td></tr>
+<tr><td>文档名称</td><td>渠道接入（QQ 官方机器人 / Telegram / 企业微信预留）详细设计书</td></tr>
+<tr><td>版本</td><td>0.5</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/channel/{channel,registry,status}.go</code>、<code>server/internal/channel/qqbot/{api,qqbot}.go</code>、<code>server/internal/channel/telegram/telegram.go</code>、<code>server/internal/channel/wecom/wecom.go</code>、<code>server/internal/runtime/runtime.go</code>、<code>server/internal/media/media.go</code>（Get）、测试 <code>qqbot_test.go</code> / <code>telegram_test.go</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版实装：统一适配器契约；QQ 开放平台官方机器人（WebSocket 网关 / Webhook 回调）；Telegram long polling；企业微信占位</td></tr>
+<tr><td>0.2</td><td>2026-10-23</td><td>QQ 新增群全量消息订阅（groupAll）、回复 @ 提问人（atUser，实验）、被动回复超窗自动改发主动消息</td></tr>
+<tr><td>0.3</td><td>2026-10-24</td><td>用户 ID 统一取 author.id；Inbound 新增 Kind / SenderRole / JoinRequest；QQ 群成员事件（1&lt;&lt;24）与入群审批；TG 入群事件与管理员角色</td></tr>
+<tr><td>0.4</td><td>2026-10-24</td><td>Outbound 以 <code>Format</code> 取代 Markdown 开关；回复用精简 Markdown 由渠道渲染（4.6）：QQ 群聊 / 单聊发 Markdown 消息（被拒改发纯文本），Telegram 用 parse_mode=HTML（解析失败改发纯文本）；新增 <code>Outbound.Quote</code>：拆条回复的第一条以引用样式展示（QQ 群聊 / 单聊带 <code>message_reference</code>，取入站事件 <code>message_scene.ext</code> 的 msg_idx）</td></tr>
+<tr><td>0.5</td><td>2026-10-25</td><td>Inbound 新增 <code>Images</code>（图片下载入口，每条最多 4 张）：QQ 取 attachments 里的图片，TG 取 photo / image document（含被引用消息）；TG 只发图不带文字的消息不再丢弃，图片说明里的 @ 改按 <code>caption_entities</code> 判定；QQ 群成员事件订阅条件纳入按群设置（FA-DD-008 4.6）</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>把各平台的事件与发送 API 翻译成平台无关的 <code>Inbound</code> / <code>Outbound</code>，让客服编排（FA-DD-004）不感知平台差异；新增渠道只需实现一个接口。</p>
+<h3>1.2 范围</h3>
+<p>适配器契约与注册表、QQ 官方机器人、Telegram、企业微信接入点。触发规则（@、白名单、命令）不在适配器内，见 FA-DD-004。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-001、FA-DD-004、FA-DD-006（人工回复经渠道发送）、FA-DD-007（渠道设置表单）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>被动回复</td><td>QQ：带被回复事件的 <code>msg_id</code> 发送（群 5 分钟内、每条最多 5 次；单聊 60 分钟、4 次），不计主动消息频控</td></tr>
+<tr><td>openid</td><td>QQ 群 / 单聊里平台给出的匿名 ID（<code>group_openid</code>、<code>member_openid</code>、<code>user_openid</code>），每个机器人看到的值不同，不是 QQ 号</td></tr>
+<tr><td>intents</td><td>QQ 网关订阅位</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<pre><code>runtime.Apply ──► Registry.Replace([qqbot.Adapter?, telegram.Adapter?], Orchestrator.Handle)
+                        │
+     Adapter.Start ─────┤  后台 goroutine：QQ 网关会话循环 / TG getUpdates 循环
+     平台事件 ──► parse ─┴► Handler(Inbound)      （适配器不等待处理结果）
+     Orchestrator ──► Registry.Send(channel, Outbound) ──► Adapter.Send
+     平台回调 /webhook/{name} ──► Registry.ServeWebhook ──► WebhookAdapter.ServeWebhook</code></pre>
+<h3>2.2 技术要素</h3>
+<ul>
+<li>QQ WebSocket：<code>github.com/coder/websocket</code>；Webhook 验签：标准库 <code>crypto/ed25519</code>。</li>
+<li>Telegram：标准库 <code>net/http</code>，无 SDK。</li>
+</ul>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li>QQ 官方机器人在群 / 公域频道<strong>只收得到 @ 它的消息</strong>，收不到群内其他人的聊天；拿不到 QQ 号与昵称（群内只有 openid）。因此会话列表中 QQ 用户显示为 openid。</li>
+<li>QQ 被动回复窗口过期或次数用尽（错误码 40034005 / 40034128）时，<code>Send</code> 去掉 msg_id / msg_seq 重发为主动消息；主动消息受频控（群：Bot 60/qpm、未认证 30/qpm，单群 20/qpm、每天 1000 条），用户关闭「允许主动发送」时失败。</li>
+<li>QQ 消息中的 URL 需在开放平台报备域名，否则发送可能被拒——知识库 / 口径中给 QQ 用户的链接应使用已报备域名。</li>
+<li>Telegram 同一 token 只能一个进程轮询；服务器无法直连 <code>api.telegram.org</code> 时把「API 地址」改为自建 Bot API Server 或反代。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>适配器契约</td><td><code>Adapter{Name, Start, Stop, Send, Status}</code>，可选 <code>WebhookAdapter.ServeWebhook</code></td></tr>
+<tr><td>F-02</td><td>注册表</td><td>整体替换（先停后起）、按渠道发送、状态汇总、webhook 分发</td></tr>
+<tr><td>F-03</td><td>QQ 鉴权</td><td>AppID + AppSecret 换 access_token，过期前 60 秒刷新</td></tr>
+<tr><td>F-04</td><td>QQ WebSocket 网关</td><td>Hello → Identify / Resume → 心跳 → Dispatch；退避重连</td></tr>
+<tr><td>F-05</td><td>QQ Webhook</td><td><code>/webhook/qqbot</code>：op=13 回调验证、Ed25519 验签、op=12 ACK</td></tr>
+<tr><td>F-06</td><td>QQ 事件解析与发送</td><td>群 @、单聊、频道 @、频道私信；被动回复 + msg_seq</td></tr>
+<tr><td>F-07</td><td>Telegram</td><td>getMe、getUpdates 长轮询、@/回复判定（UTF-16 偏移）、sendMessage 4096 硬切</td></tr>
+<tr><td>F-08</td><td>企业微信（预留）</td><td>设置分区已定义，适配器待实装</td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 契约（F-01/F-02）</h3>
+<table>
+<thead><tr><th>Inbound 字段</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>Channel / ChatType / ChatID / ChatTitle</td><td>ChatType ∈ <code>group</code> / <code>private</code> / <code>guild</code> / <code>guild_dm</code></td></tr>
+<tr><td>MessageID</td><td>平台消息 ID（入站去重、被动回复）</td></tr>
+<tr><td>Kind</td><td>空 = 消息；<code>member_join</code> 新成员入群；<code>join_request</code> 入群申请（带 <code>JoinRequest{RequestID, Answer, AutoApproved}</code>）</td></tr>
+<tr><td>SenderID / SenderName</td><td>QQ 统一取 <code>author.id</code>（实测同一机器人下，同一个人群聊的 member_openid 与单聊的 user_openid 都等于它，2026-10-24），昵称取 <code>author.username</code>（单聊事件不带昵称）</td></tr>
+<tr><td>SenderRole</td><td>群内角色 owner / admin / member：QQ 取 <code>author.member_role</code>，TG 取 getChatAdministrators（缓存 10 分钟）</td></tr>
+<tr><td>Text</td><td>已剥掉 @机器人 的正文（trim）</td></tr>
+<tr><td>Mentioned</td><td>是否 @ / 回复了机器人；私聊恒 true</td></tr>
+<tr><td>Quoted</td><td>被引用消息文本（TG 回复消息时）</td></tr>
+<tr><td>Images</td><td>附带的图片 <code>[]Image{ContentType, Size, Open(ctx)}</code>，最多 4 张（<code>channel.MaxImages</code>）。适配器只提供下载入口，下载在编排器的会话 worker 里做（FA-DD-004 4.12），不阻塞事件循环；TG 的下载地址含 token，只在进程内使用，不落库</td></tr>
+</tbody>
+</table>
+<ul>
+<li><code>Outbound{ChatType, ChatID, Text, ReplyTo, Seq}</code>：ReplyTo 为被回复的平台消息 ID；Seq 为 QQ <code>msg_seq</code>。</li>
+<li><code>Registry.Replace</code>：先取出旧集合并全部 <code>Stop</code>（等待后台 goroutine 退出），再逐个 <code>Start</code>。启动失败的适配器也登记，状态里可见错误，由其自身退避重试。</li>
+<li><code>Registry.Send</code>：渠道未启用 → 错误 <code>渠道 {name} 未启用</code>。</li>
+<li><code>StatusBox</code>：适配器共用的并发安全状态（enabled / connected / detail / lastError）。</li>
+</ul>
+<h3>4.2 QQ 官方机器人（F-03 ~ F-06）</h3>
+<h4>4.2.1 鉴权</h4>
+<ul>
+<li><code>POST https://bots.qq.com/app/getAppAccessToken</code> <code>{"appId","clientSecret"}</code> → <code>{"access_token","expires_in"}</code>（<code>expires_in</code> 为字符串秒数，解析失败按 7200）。</li>
+<li>OpenAPI 基址 <code>https://api.sgroup.qq.com</code>，沙箱 <code>https://sandbox.api.sgroup.qq.com</code>；请求头 <code>Authorization: QQBot {token}</code>。</li>
+<li>非 2xx：错误串 <code>QQ API {method} {path}: HTTP {status} code={code} {message}</code>，原样进日志与状态。</li>
+<li><code>Start</code> 先换一次 token：凭据错误立即在状态中可见（webhook 模式下直接返回错误）。</li>
+</ul>
+<h4>4.2.2 WebSocket 网关</h4>
+<ol>
+<li>S-01 <code>GET /gateway</code> 取 wss 地址并连接（读上限 4MB）。</li>
+<li>S-02 读 op=10 Hello，取 <code>heartbeat_interval</code>（缺省 40s）。</li>
+<li>S-03 有 session_id → op=6 Resume <code>{token, session_id, seq}</code>；否则 op=2 Identify <code>{token:"QQBot …", intents, shard:[0,1]}</code>。</li>
+<li>S-04 心跳 goroutine 按间隔发 op=1，<code>d</code> 为最近序号（首次 null）。</li>
+<li>S-05 读循环：每次读超时 = 3 个心跳周期（平台侧假死时 Read 不会自己返回）；op=0 READY 记 session_id 并标记已连接，RESUMED 标记已连接，其余事件分发解析。</li>
+<li>S-06 op=7 → 断开重连（保留 session 走 Resume）；op=9 → 丢弃 session 重新 Identify，并提示检查 intents 权限。</li>
+<li>S-07 外层循环退避 1s 起倍增、上限 60s；本次会话曾就绪则退避重置为 1s。</li>
+</ol>
+<table>
+<thead><tr><th>订阅开关</th><th>intents 位</th><th>事件</th></tr></thead>
+<tbody>
+<tr><td>QQ 群 / 单聊</td><td><code>1&lt;&lt;25</code> GROUP_AND_C2C_EVENT</td><td><code>GROUP_AT_MESSAGE_CREATE</code>、<code>C2C_MESSAGE_CREATE</code>；<code>groupAll=true</code> 时另处理 <code>GROUP_MESSAGE_CREATE</code>（同一订阅位，需开放平台开通「接收所有消息」）</td></tr>
+<tr><td>频道 @</td><td><code>1&lt;&lt;30</code> PUBLIC_GUILD_MESSAGES</td><td><code>AT_MESSAGE_CREATE</code></td></tr>
+<tr><td>频道私信</td><td><code>1&lt;&lt;12</code> DIRECT_MESSAGE</td><td><code>DIRECT_MESSAGE_CREATE</code></td></tr>
+<tr><td>群成员事件（入群欢迎或入群审核开启时）</td><td><code>1&lt;&lt;24</code> GROUP_MEMBER_EVENT</td><td><code>GROUP_MEMBER_ADD</code>、<code>GROUP_JOIN_REQUEST</code>（后者仅机器人为群管理员时推送）；需在开放平台开通，未开通时网关 op=9</td></tr>
+</tbody>
+</table>
+<h4>4.2.3 Webhook</h4>
+<ul>
+<li>签名密钥：AppSecret 反复拼接到 ≥32 字节取前 32 字节作 Ed25519 seed（官方算法）。</li>
+<li>op=13 回调地址验证：对 <code>event_ts + plain_token</code> 签名，返回 <code>{"plain_token","signature":hex}</code>。</li>
+<li>其他请求：校验头 <code>X-Signature-Ed25519</code>（hex，64 字节）与 <code>X-Signature-Timestamp</code>，消息 = <code>timestamp + 原始 body</code>；失败 401 <code>invalid signature</code>。</li>
+<li>op=0 事件分发后返回 <code>{"op":12}</code>。分发是同步调用 Handler，但 Handler 只做落库与入队，推理异步，响应在毫秒级。</li>
+<li>平台超时重推同一事件时，由 <code>messages</code> 入站唯一索引去重（FA-DD-006）。</li>
+</ul>
+<h4>4.2.4 事件解析与发送</h4>
+<table>
+<thead><tr><th>事件</th><th>ChatType</th><th>ChatID</th><th>SenderID</th><th>发送路径</th></tr></thead>
+<tbody>
+<tr><td>GROUP_AT_MESSAGE_CREATE</td><td>group</td><td>group_openid</td><td>author.id</td><td><code>POST /v2/groups/{id}/messages</code></td></tr>
+<tr><td>GROUP_MESSAGE_CREATE（groupAll）</td><td>group</td><td>group_openid</td><td>author.id</td><td>同上</td></tr>
+<tr><td>C2C_MESSAGE_CREATE</td><td>private</td><td>author.user_openid</td><td>author.user_openid</td><td><code>POST /v2/users/{id}/messages</code></td></tr>
+<tr><td>AT_MESSAGE_CREATE</td><td>guild</td><td>channel_id</td><td>author.id（有 username）</td><td><code>POST /channels/{id}/messages</code></td></tr>
+<tr><td>DIRECT_MESSAGE_CREATE</td><td>guild_dm</td><td>guild_id（私信会话）</td><td>author.id</td><td><code>POST /dms/{id}/messages</code></td></tr>
+</tbody>
+</table>
+<ul>
+<li>正文：剥掉 <code>&lt;@!?ID&gt;</code>（频道 <code>&lt;@!数字&gt;</code>、全量群消息 <code>&lt;@member_openid&gt;</code> / <code>&lt;@all&gt;</code>）并 trim。<code>Mentioned</code>：@ 事件与单聊恒 true；<code>GROUP_MESSAGE_CREATE</code> 看 <code>mentions[]</code> 中 <code>is_you</code>，或 <code>bot=true</code> 且 ID 等于 READY 下发的机器人 ID。<code>author.bot=true</code>（机器人自己 / 其他机器人）丢弃。</li>
+<li>全量模式下同一条 @ 消息可能以两种事件各推一次，由入站唯一索引（FA-DD-006 4.1）去重。</li>
+<li>图片：消息事件 <code>attachments[]</code> 中 <code>content_type</code> 为 image/*（或为空但文件名是图片扩展名）的附件转为 <code>Images</code>；附件地址不带协议头时补 <code>https://</code>（<code>//</code> 开头补 <code>https:</code>）。只发图片的消息 <code>content</code> 为空格，<code>Text</code> 为空。语音、视频、文件附件不处理。</li>
+<li><code>atUser=true</code> 且为群聊时，拆条后的第一条正文前加 <code>&lt;qqbot-at-user id="{member_openid}" /&gt;</code>（官方「文本交互」文档的格式；2026-10-24 实测主动消息里显示为原文，缺省关闭）。</li>
+<li><code>ReviewJoin</code>：<code>POST /v2/groups/{group}/approval_join_request/{member}</code> <code>{op: approve|decline, join_request_id, reject_reason}</code>（机器人需是群管理员，60 QPM）。</li>
+<li>Telegram：消息的 <code>new_chat_members</code> 转为 <code>member_join</code> 事件（跳过机器人）；群消息附带 SenderRole。</li>
+<li>引用回复：<code>Quote=true</code> 时带 <code>message_reference:{message_id}</code>。群聊 / 单聊的 message_id 不是 msg_id，而是入站事件 <code>message_scene.ext</code> 里的 <code>msg_idx=REFIDX_…</code>（适配器按 msg_id 缓存 2 小时，进程内）；频道用消息 ID。取不到索引就不带；平台以 4xx 拒收引用时去掉引用重发一次。事件未带 msg_idx 时记一次 info 日志。</li>
+<li>发送体 <code>{content, msg_type:0, msg_id, msg_seq}</code>；频道 / 私信不带 msg_type 与 msg_seq。同一 msg_id 下多条回复必须 msg_seq 不同，否则平台按重复消息丢弃：编排器以毫秒时间低位 ×10 + 序号生成（FA-DD-004）。</li>
+</ul>
+<h3>4.3 Telegram（F-07）</h3>
+<ol>
+<li>S-01 <code>Start</code>：<code>getMe</code>（15s 超时）取 bot id 与 username，失败返回错误（token 无效时立刻可见）。</li>
+<li>S-02 轮询：<code>getUpdates{offset, timeout:30, allowed_updates:["message"]}</code>，HTTP 客户端超时 45s。失败退避 1s~60s；<strong>任意一次成功即把状态置回已连接</strong>（否则一次失败后会永远显示断开）。</li>
+<li>S-03 offset 只在进程内推进（处理完一条即 <code>update_id+1</code>）。重启后从平台未确认的更新继续，可能重复的少量消息由入站唯一索引去重。</li>
+<li>S-04 解析：文本取 text，没有则取 caption（此时 @ 实体取 <code>caption_entities</code>）；图片取 <code>photo</code> 里不超过 10MB 的最大尺寸，以及 mime 为 image/* 的 <code>document</code>，被回复消息里的图片也带上（下载时先 <code>getFile</code> 换 <code>file_path</code>，再 GET <code>{apiBase}/file/bot{token}/{file_path}</code>）。文本与图片都没有的消息、机器人自己的消息忽略。私聊（开关可关）直接触发；群（group / supergroup）判定 @：
+<ul>
+<li><code>mention</code> 实体：按 <strong>UTF-16 码元</strong>切出 <code>@name</code>，与 bot username 忽略大小写比较；</li>
+<li><code>text_mention</code> 实体：user.id 等于 bot id；</li>
+<li>回复机器人的消息（<code>reply_to_message.from.id == bot id</code>）。</li>
+</ul>
+命中的实体从后往前删掉，保持前面实体偏移不变。被回复消息的文本进 <code>Quoted</code>。频道（channel）类型忽略。</li>
+<li>S-05 发送：<code>sendMessage{chat_id, text, reply_parameters:{message_id, allow_sending_without_reply:true}}</code>，单条超过 4096 字硬切，仅首段引用；每次调用 20s 超时。<code>Format=markdown</code> 时先渲染为 HTML、带 <code>parse_mode:"HTML"</code> 与 <code>link_preview_options:{is_disabled:true}</code> 整条发送；HTML 超过 4096 字，或平台报 <code>can't parse entities</code>，改发纯文本（4.6）。</li>
+</ol>
+<h3>4.4 企业微信（F-08，预留）</h3>
+<ul>
+<li>设置分区 <code>channel.wecom</code>：CorpID、AgentID、Secret、Token、EncodingAESKey 已定义并参与掩码；<code>settings.Validate</code> 禁止启用（<code>企业微信渠道尚未开放，请保持关闭</code>）。</li>
+<li>实装步骤（写在 <code>internal/channel/wecom/wecom.go</code> 包注释）：
+<ol>
+<li>实现 <code>channel.WebhookAdapter</code>：GET 回调 URL 验证（msg_signature 校验 + AES 解密 echostr 原样返回）；POST 收加密 XML，解密后转 <code>Inbound</code>（应用消息：private / FromUserName；群机器人：group），5 秒内返回空串、处理异步。</li>
+<li><code>Send</code>：<code>gettoken</code>（corpid + secret，7200s 缓存）→ <code>/cgi-bin/message/send</code>；无被动回复窗口，忽略 ReplyTo。</li>
+<li><code>runtime.Apply</code> 按开关装配，删除 Validate 中的禁用分支；前端设置页替换占位说明为表单。</li>
+</ol></li>
+<li>编排器、会话、后台均无需改动——这是适配器契约的验收标准。</li>
+</ul>
+<h3>4.5 异常系</h3>
+<ul>
+<li>E-01 QQ token 获取失败：状态 lastError 为 <code>获取 access_token 失败: code=… …</code>；websocket 模式继续退避重试。</li>
+<li>E-02 QQ op=9：lastError <code>会话失效（检查 intents 权限是否已在开放平台开通）</code>——常见于未开通群 / 频道权限却勾选了对应订阅。</li>
+<li>E-03 TG 409（另一实例在轮询）：退避重试并显示错误，不退出进程。</li>
+<li>E-04 发送失败：编排器记 error 日志并停止发送本轮剩余分段，已发分段照常落库。</li>
+</ul>
+
+<h3>4.6 回复格式渲染</h3>
+<p><code>Outbound.Format</code>：空 = 纯文本原样；<code>markdown</code> = 回复用精简 Markdown（<code>channel/markdown.go</code>），渠道发送前渲染；<code>qqmarkdown</code> = QQ 原生 Markdown（入群欢迎模板，可含 <code>&lt;qqbot-at-user&gt;</code> 等标签），只有 QQ 群聊 / 单聊按 Markdown 消息发，其他按原文。</p>
+<table>
+<thead><tr><th>输入</th><th>QQ 群聊 / 单聊（RenderQQ）</th><th>Telegram（RenderTelegramHTML）</th><th>其他（RenderPlain）</th></tr></thead>
+<tbody>
+<tr><td><code>**加粗**</code></td><td>原样</td><td><code>&lt;b&gt;</code></td><td>去标记</td></tr>
+<tr><td><code>`行内代码`</code></td><td>去反引号（QQ 不支持代码）</td><td><code>&lt;code&gt;</code></td><td>去反引号</td></tr>
+<tr><td>``` 代码块</td><td>改成引用块，每行一条，行首缩进换成不换行空格</td><td><code>&lt;pre&gt;</code></td><td>原文行</td></tr>
+<tr><td><code>[文字](url)</code></td><td>原样</td><td><code>&lt;a href&gt;</code></td><td>文字（url）</td></tr>
+<tr><td><code>- </code> / <code>1. </code> 列表</td><td>原样，保证列表前有空行（QQ 要求）</td><td>「• 」/ 序号文本</td><td>「• 」/ 序号文本</td></tr>
+<tr><td><code>&gt; </code> 引用</td><td>原样</td><td><code>&lt;blockquote&gt;</code>（连续行合并）</td><td>去标记</td></tr>
+<tr><td><code>#</code> 标题 / 分割线</td><td colspan="3">标题降级为加粗行；分割线丢弃</td></tr>
+</tbody>
+</table>
+<p>QQ 发送 <code>msg_type:2, markdown:{content}</code>（与被动回复 msg_id / msg_seq 同用）；平台以 4xx 拒收（被动额度用尽 / 过期除外）时，同一条改为 <code>msg_type:0</code> + RenderPlain 再发一次。频道与频道私信不支持自定义 Markdown，直接发 RenderPlain。所有文本先做 HTML 转义再套标签（Telegram）；渲染只做行级解析，异常输入宁可原样输出。</p>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<p>适配器无自有表；入站落 <code>messages</code>（FA-DD-006）。</p>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>channel.qqbot</code>、<code>channel.telegram</code>、<code>channel.wecom</code>，字段见第 7 章。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>来源</th><th>message</th></tr></thead>
+<tbody>
+<tr><td>Registry.Send</td><td>渠道 {name} 未启用</td></tr>
+<tr><td>QQ token</td><td>获取 access_token: {网络错误} / 获取 access_token 失败: code={code} {message}</td></tr>
+<tr><td>QQ API</td><td>QQ API {method} {path}: HTTP {status} code={code} {message}</td></tr>
+<tr><td>QQ 网关</td><td>连接网关: … / 预期 Hello，收到 op={n} / 平台要求重连 / 会话失效（检查 intents 权限是否已在开放平台开通）</td></tr>
+<tr><td>QQ 发送</td><td>QQ 不支持的聊天类型 {type}</td></tr>
+<tr><td>QQ Webhook</td><td>401 invalid signature / 400 bad request / 400 bad payload</td></tr>
+<tr><td>Telegram</td><td>telegram {method}: {error_code} {description} / telegram {method}: HTTP {status} / telegram chat_id 非法</td></tr>
+<tr><td>设置校验</td><td>启用 QQ 机器人需要填写 AppID 与 AppSecret / 启用 Telegram 需要填写 Bot Token / QQ 机器人接入方式只支持 websocket / webhook / 企业微信渠道尚未开放，请保持关闭</td></tr>
+</tbody>
+</table>
+
+<h2>7. 配置项</h2>
+<table>
+<thead><tr><th>分区.字段</th><th>缺省</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>channel.qqbot.enabled</td><td>false</td><td></td></tr>
+<tr><td>channel.qqbot.appId / appSecret</td><td>""</td><td>appSecret 掩码回显</td></tr>
+<tr><td>channel.qqbot.mode</td><td>websocket</td><td>websocket / webhook（回调地址 <code>https://域名/webhook/qqbot</code>）</td></tr>
+<tr><td>channel.qqbot.sandbox</td><td>false</td><td>沙箱 OpenAPI</td></tr>
+<tr><td>channel.qqbot.group / c2c / guild / guildDm</td><td>true / true / false / false</td><td>订阅范围</td></tr>
+<tr><td>channel.qqbot.groupAll</td><td>false</td><td>处理群全量消息 GROUP_MESSAGE_CREATE（需开放平台开通）</td></tr>
+<tr><td>channel.qqbot.atUser</td><td>false</td><td>群回复 @ 提问人（实验）</td></tr>
+<tr><td>channel.telegram.enabled</td><td>false</td><td></td></tr>
+<tr><td>channel.telegram.botToken</td><td>""</td><td>掩码回显</td></tr>
+<tr><td>channel.telegram.apiBase</td><td>https://api.telegram.org</td><td>可指向自建 Bot API Server / 反代</td></tr>
+<tr><td>channel.telegram.private</td><td>true</td><td>是否响应私聊</td></tr>
+<tr><td>channel.wecom.*</td><td>—</td><td>预留，不可启用</td></tr>
+</tbody>
+</table>
+</main>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-STD-001 设计书编写规范</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-STD-001 设计书编写规范</h1>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>文档编号</td>
+<td>FA-STD-001</td>
+</tr>
+<tr>
+<td>版本</td>
+<td>1.3</td>
+</tr>
+<tr>
+<td>制定日</td>
+<td>2026-08-14</td>
+</tr>
+</tbody></table>
+<h2>改订履历</h2>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>日期</th>
+<th>修改内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1.0</td>
+<td>2026-08-14</td>
+<td>初版制定</td>
+</tr>
+<tr>
+<td>1.1</td>
+<td>2026-08-14</td>
+<td>简化：只保留七章骨架</td>
+</tr>
+<tr>
+<td>1.2</td>
+<td>2026-08-26</td>
+<td><strong>载体由 Markdown 迁移为纯语义 HTML</strong>（<code>FA-DD-XXX_功能名.html</code>）：正文只用基础语义标签（h1~h4 / p / table / ul / ol / li / code / pre / blockquote / a / strong / em），<strong>零 class、零内联样式、零脚本</strong>；样式统一在 <code>assets/style.css</code>（只按裸标签选择），目录侧栏 / 标题锚点 / <code>FA-DD-XXX</code> 字样自动跳转等交互统一在 <code>assets/doc.js</code> 运行时注入；文档清单由 <code>assets/manifest.js</code> 维护，新增设计书须往里加一行。七章骨架与编写纪律不变</td>
+</tr>
+<tr>
+<td>1.3</td>
+<td>2026-10-23</td>
+<td>知微（Zhiwei）的设计书按本规范编写。知微无 Redis，第 5.2 节改为「设置分区（<code>system_settings</code> key）」；第 7 章「配置项」以设置分区字段为主，env 只有 <code>ZHIWEI_DB_DSN</code> / <code>ZHIWEI_HTTP_ADDR</code></td>
+</tr>
+</tbody></table>
+<hr>
+<p>设计书（<code>docs/设计书/FA-DD-XXX_功能名.html</code>，纯语义 HTML，见 v1.2）统一按以下七章编写，无内容的章节写「无」，不删章：</p>
+<pre><code>1. 概要            1.1 目的  1.2 范围  1.3 相关文档  1.4 用语定义
+2. 前提            2.1 系统构成  2.2 技术要素  2.3 前提条件・制约事项
+3. 功能一览        （功能 ID + 一句话说明 + 对应 API 的总表）
+4. 功能详细        （每个功能一节：接口定义、入出力项目表、
+                     处理流程 S-01… + mermaid 序列图、异常系 E-01…）
+5. 数据定义        5.1 DB 表定义  5.2 设置分区（system_settings key）
+6. 错误一览        （全功能错误码汇总表）
+7. 配置项          （env / 系统设置中与本功能相关的配置）
+</code></pre>
+<ul>
+<li>处理步骤编号 S-01…、异常编号 E-01…、功能编号 F-01…，便于评审/测试用例引用。</li>
+<li>错误 message、TTL 等一律照抄实现，实现变更时文档同步改版（改订履历追加一行）。</li>
+</ul>
+</main>
+</body>
+</html>

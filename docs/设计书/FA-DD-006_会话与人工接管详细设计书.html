@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-006 会话与人工接管详细设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-006 会话与人工接管详细设计书</h1>
+<table>
+<thead><tr><th>项目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-006</td></tr>
+<tr><td>文档名称</td><td>会话、消息与人工接管（转人工 / 人工回复 / 恢复自动）详细设计书</td></tr>
+<tr><td>版本</td><td>0.3</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/internal/store/conversations.go</code>、<code>server/internal/agent/orchestrator.go</code>（openHandoff / HumanReply / Resume / RunHandoffSweeper）、<code>server/internal/httpapi/server.go</code>（会话 / handoffs）、<code>web/src/app/admin/{conversations,handoffs}/page.tsx</code>、<code>web/src/components/conversation-panel.tsx</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead><tr><th>版本</th><th>日期</th><th>修改内容</th></tr></thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版实装：恢复自动回复用后台按钮；新增后台以机器人身份人工回复</td></tr>
+<tr><td>0.2</td><td>2026-10-23</td><td>QQ 人工回复超过被动窗口时改发主动消息，不再直接失败</td></tr>
+<tr><td>0.3</td><td>2026-10-24</td><td>platform_msg_id / last_inbound_msg_id 放宽为 TEXT（群 msg_id 超 128 字符导致入站落库失败）；实测 QQ 同一用户群聊 member_openid 与单聊 user_openid 相同</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>记录每个用户的完整对话，让管理员能看到机器人答了什么；AI 无法可靠处理时把会话交给人工，人工直接在后台回复用户，处理完一键恢复自动客服。</p>
+<h3>1.2 范围</h3>
+<p>会话 / 消息模型与去重、会话列表与详情、转人工的三种入口、人工回复、恢复（手动 / 超时）、上下文重置。</p>
+<h3>1.3 相关文档</h3>
+<p>FA-DD-003（被动回复窗口）、FA-DD-004（命令、工具、历史）。</p>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>会话状态</td><td><code>active</code>（自动回复）/ <code>handoff</code>（人工接待，自动回复暂停）</td></tr>
+<tr><td>上下文起点（context_since）</td><td>早于它的消息仍可在后台查看，但不再喂给模型</td></tr>
+<tr><td>消息方向</td><td><code>in</code> 用户 / <code>out</code> 机器人 / <code>human</code> 后台人工</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<p>写入侧在编排器（入站、回复、工单）；读取侧为后台 REST。会话详情抽屉每 5 秒轮询，人工队列与总览每 15 秒轮询（一期不做推送）。</p>
+<h3>2.2 技术要素</h3>
+<p>入站去重用部分唯一索引 + <code>ON CONFLICT DO NOTHING</code>；工单开关用条件更新保证幂等。</p>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li>会话键 = (channel, chat_id, user_id)：群里每个用户一个会话，上下文不串；同一用户在不同群是不同会话。</li>
+<li>人工回复经原渠道以机器人身份发出：QQ 借最近一条入站消息做被动回复，超过 5 分钟（或该消息已回复 5 次）自动改发主动消息，受主动消息频控、用户可关闭接收（抽屉内有提示）；TG 无此限制。</li>
+<li>一期无「转人工通知」推送；管理员需关注后台人工队列 / 总览「待人工」数。二期可接入通知渠道。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>API</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>会话列表</td><td><code>GET /api/conversations?channel=&amp;status=&amp;keyword=&amp;page=</code>（每页 20）</td></tr>
+<tr><td>F-02</td><td>会话详情 / 消息</td><td><code>GET /api/conversations/:id</code>、<code>GET /api/conversations/:id/messages?before=</code>（每次 50 条）</td></tr>
+<tr><td>F-03</td><td>转人工</td><td>用户发「人工」/ 模型调 <code>transfer_to_human</code>（无后台入口）</td></tr>
+<tr><td>F-04</td><td>人工回复</td><td><code>POST /api/conversations/:id/reply</code> <code>{text}</code></td></tr>
+<tr><td>F-05</td><td>恢复自动</td><td><code>POST /api/conversations/:id/resume</code></td></tr>
+<tr><td>F-06</td><td>超时自动恢复</td><td>后台每分钟扫描</td></tr>
+<tr><td>F-07</td><td>重置上下文</td><td><code>POST /api/conversations/:id/reset</code>；用户发「重置」</td></tr>
+<tr><td>F-08</td><td>人工队列</td><td><code>GET /api/handoffs?status=open|resolved&amp;page=</code></td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 入站落库与去重</h3>
+<ul>
+<li><code>AddMessage</code>：<code>INSERT … ON CONFLICT (conversation_id, platform_msg_id) WHERE direction='in' AND platform_msg_id&lt;&gt;'' DO NOTHING RETURNING id</code>；无返回行 → <code>ErrDuplicate</code>，编排器静默结束。覆盖 QQ webhook 超时重推、WS Resume 补发、TG 重启后重复拉取。</li>
+<li>入站同时刷新 <code>last_message_at</code> 与 <code>last_inbound_msg_id</code>；出站只刷新 <code>last_message_at</code>。</li>
+</ul>
+<h3>4.2 转人工（F-03）</h3>
+<pre><code>stateDiagram-v2
+  active --&gt; handoff: 用户「人工」/ transfer_to_human
+  handoff --&gt; handoff: 再次「人工」（回「正在处理中」）
+  handoff --&gt; active: 后台恢复自动 / 超时
+  active --&gt; active: 重置（推进 context_since）</code></pre>
+<ol>
+<li>S-01 单事务：<code>UPDATE conversations SET status='handoff' WHERE id=? AND status&lt;&gt;'handoff'</code>；影响 0 行 → 已在人工中，不重复建单。</li>
+<li>S-02 影响 1 行 → 插入 <code>handoffs(reason, summary)</code>。关键词入口 reason=「客户主动要求人工」、summary=原文；模型入口取工具参数。</li>
+<li>S-03 关键词入口由系统回固定话术；模型入口由模型在回复中告知客户（工具结果有指示）。</li>
+<li>S-04 handoff 期间：用户消息照常落库（后台可见），不入推理队列；排队中的轮次开始前重读状态，已转人工则放弃。</li>
+</ol>
+<h3>4.3 人工回复（F-04）</h3>
+<ol>
+<li>S-01 文本 trim 后非空；体验台会话前端禁用。</li>
+<li>S-02 以 <code>last_inbound_msg_id</code> 为 ReplyTo 拆条发送（规则同 FA-DD-004 4.8），每段以 <code>direction=human</code>、<code>sender_name=管理员用户名</code> 落库。</li>
+<li>S-03 发送失败 → 502「发送失败：{平台错误}」。</li>
+<li>人工回复在后续历史中以「（人工客服）…」的助手消息出现；恢复自动时 context_since 推进，因此不会被模型续写。</li>
+</ol>
+<h3>4.4 恢复自动（F-05/F-06）</h3>
+<ol>
+<li>S-01 单事务：关闭该会话全部 open 工单（<code>resolved_at=now</code>，<code>resolved_by</code>=管理员，超时为 NULL）→ <code>status='active', context_since=now()</code>。</li>
+<li>S-02 原状态为 handoff 且非体验台：向用户发「已恢复自动客服，有问题可以继续问我。」（QQ 超窗会发送失败，仅记日志）。</li>
+<li>超时扫描：每分钟查 <code>status='open' AND created_at &lt; now − handoffTimeoutMin</code> 的会话逐个恢复；<code>handoffTimeoutMin=0</code> 关闭。</li>
+</ol>
+<h3>4.5 后台界面（F-01/F-02/F-08）</h3>
+<ul>
+<li>会话列表：关键词（用户名 / 用户 ID / 群名 / 群 ID，回车生效）、渠道、状态筛选；表头等宽小号、数字列右对齐等宽（设计系统「表格」）；超过一页显示「第 x/y 页 · 共 n 条」。</li>
+<li>详情抽屉：气泡区分用户（白底描边）/ 机器人（accent-soft）/ 人工（warn-soft）；上下文起点之前的消息半透明；底部人工回复框（⌘/Ctrl + Enter 发送），人工中显示「处理完毕，恢复自动」，否则显示「重置上下文」。</li>
+<li>人工队列：分段标签 待处理 / 已处理 / 全部，卡片展示用户、渠道、状态、时间、摘要与原因，点击打开同一抽屉。</li>
+</ul>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表.列</th><th>类型</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>conversations.channel / chat_type / chat_id / user_id</td><td>VARCHAR</td><td>UNIQUE (channel, chat_id, user_id)</td></tr>
+<tr><td>conversations.user_name / title</td><td>VARCHAR(255)</td><td>非空入参才覆盖</td></tr>
+<tr><td>conversations.status</td><td>VARCHAR(16) DEFAULT 'active'</td><td>active / handoff</td></tr>
+<tr><td>conversations.context_since</td><td>TIMESTAMPTZ DEFAULT now()</td><td>重置 / 恢复时推进</td></tr>
+<tr><td>conversations.last_inbound_msg_id</td><td>TEXT</td><td>被动回复用（QQ msg_id 实测可超 128 字符，迁移 20261023160500 由 VARCHAR(128) 放宽）</td></tr>
+<tr><td>conversations.last_message_at</td><td>TIMESTAMPTZ（索引 DESC）</td><td>列表排序</td></tr>
+<tr><td>messages.direction</td><td>VARCHAR(8)</td><td>in / out / human</td></tr>
+<tr><td>messages.sender_id / sender_name / content / platform_msg_id</td><td>platform_msg_id 为 TEXT</td><td>uq_messages_inbound 部分唯一索引</td></tr>
+<tr><td>handoffs.reason / summary</td><td>TEXT</td><td></td></tr>
+<tr><td>handoffs.status</td><td>VARCHAR(16)</td><td>open / resolved；索引 (status, created_at DESC)</td></tr>
+<tr><td>handoffs.resolved_at / resolved_by</td><td>TIMESTAMPTZ / BIGINT FK SET NULL</td><td>resolved_by 为 NULL 且 resolved = 超时自动恢复</td></tr>
+</tbody>
+</table>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>agent.handoffTimeoutMin</code>（缺省 30）。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>HTTP</th><th>message</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>回复内容不能为空</td></tr>
+<tr><td>502</td><td>发送失败：{平台错误}</td></tr>
+<tr><td>404</td><td>记录不存在</td></tr>
+</tbody>
+</table>
+<p>对用户的固定话术：「已为你转接人工客服，请稍候，客服会尽快回复你。期间自动回复暂停。」「人工客服正在处理中，请耐心等待。」「已恢复自动客服，有问题可以继续问我。」</p>
+
+<h2>7. 配置项</h2>
+<p><code>agent.handoffTimeoutMin</code>：人工接待超过该分钟数无人处理则自动恢复，0 不恢复。</p>
+</main>
+</body>
+</html>

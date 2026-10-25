@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FA-DD-001 系统总体设计书</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/manifest.js"></script>
+<script defer src="assets/doc.js"></script>
+</head>
+<body>
+<main>
+<h1>FA-DD-001 系统总体设计书</h1>
+<table>
+<thead>
+<tr><th>项目</th><th>内容</th></tr>
+</thead>
+<tbody>
+<tr><td>文档编号</td><td>FA-DD-001</td></tr>
+<tr><td>文档名称</td><td>知微（Zhiwei）多渠道 AI 客服 · 系统总体设计书</td></tr>
+<tr><td>版本</td><td>0.7</td></tr>
+<tr><td>作成日</td><td>2026-10-23</td></tr>
+<tr><td>对应实现</td><td><code>server/cmd/zhiwei/main.go</code>、<code>server/internal/{config,store,settings,runtime,httpapi}</code>、<code>server/db/migrations/pg/20261023000000_init.sql</code>、<code>web/next.config.ts</code>、<code>docker-compose.yml</code></td></tr>
+</tbody>
+</table>
+<h2>改订履历</h2>
+<table>
+<thead>
+<tr><th>版本</th><th>日期</th><th>修改内容</th></tr>
+</thead>
+<tbody>
+<tr><td>0.1</td><td>2026-10-23</td><td>初版：后端 Go，存储 PostgreSQL，LLM 用 HTTP 直连 tool calling（不拉起 Claude Code CLI）；QQ 接入 QQ 开放平台官方机器人；env 收敛到只剩数据库连接串，其余配置由首次启动的初始化向导写入数据库</td></tr>
+<tr><td>0.2</td><td>2026-10-23</td><td>订正 QQ 能力描述：可订阅群全量消息；被动回复超窗改发主动消息</td></tr>
+<tr><td>0.3</td><td>2026-10-24</td><td>v0.2 实装群运营（FA-DD-008）与反思沉淀（FA-DD-009）；删除 0.2 引入的 groupTrigger=all（由主动回复取代）；路线表更新</td></tr>
+<tr><td>0.4</td><td>2026-10-24</td><td>知识库目录与批量导入、向量混合检索实装（FA-DD-005 v0.3）；docker-compose 新增可选 embed 服务</td></tr>
+<tr><td>0.5</td><td>2026-10-24</td><td>技能实装（FA-DD-010）：上传 SKILL.md 技能包，模型经 read_skill 按需读取；路线表更新</td></tr>
+<tr><td>0.6</td><td>2026-10-24</td><td>新增内置工具 <code>model_catalog</code>（实时模型目录，FA-DD-004 4.7.1）</td></tr>
+<tr><td>0.7</td><td>2026-10-25</td><td>新增图片识别（FA-DD-004 4.12）、按群设置与问题排行（FA-DD-008 4.6 / 4.7）、用量统计与运行日志（FA-DD-007 4.7 / 4.8）；路线表更新。管理群通知 / 群内审核指令、入站意图拦截不做（在后台处理；套取由 system prompt 保密规则兜底）</td></tr>
+</tbody>
+</table>
+<hr>
+
+<h2>1. 概要</h2>
+<h3>1.1 目的</h3>
+<p>知微是一套面向社区场景（QQ 群 / 频道、Telegram 群）的 AI 客服系统：接入真实会话，依据知识库作答，需要人工时转入人工队列，后台可查看全部会话并以机器人身份人工回复。本书描述整体架构、进程与模块划分、跨功能的设计决策与关键设计取舍。各功能细节见 FA-DD-002 ~ FA-DD-010。</p>
+<h3>1.2 范围</h3>
+<ul>
+<li>一期（v0.1，本次实装）：初始化向导、管理员认证、QQ 官方机器人（WebSocket / Webhook）、Telegram（long polling）、企业微信接口预留、LLM 直连（OpenAI 兼容 / Anthropic）、知识库（BM25）、预检索 + 工具循环、转人工与超时恢复、后台（总览 / 会话 / 人工队列 / 知识库 / 体验台 / 系统设置）。</li>
+<li>v0.2（2026-10-24 实装）：群运营——群消息时间线、主动回复、入群欢迎、入群审核（FA-DD-008）；反思沉淀——提炼、整理、升格（FA-DD-009）。</li>
+<li>2026-10-24 追加：知识库目录 / 批量导入 / 向量混合检索（FA-DD-005）、技能（SKILL.md 技能包，FA-DD-010）。</li>
+<li>2026-10-25 追加：图片识别、按群设置、问题排行、用量统计、运行日志。</li>
+<li>后续（规划）：业务插件工具（HTTP 工具，可作为技能的可执行部分）、企业微信适配器、多管理员与操作审计。见 4.6。</li>
+</ul>
+<h3>1.3 相关文档</h3>
+<ul>
+<li>FA-STD-001 设计书编写规范（七章格式）</li>
+<li>FA-DD-002 初始化向导与认证、FA-DD-003 渠道接入、FA-DD-004 客服 Agent、FA-DD-005 知识库、FA-DD-006 会话与人工接管、FA-DD-007 管理后台与系统设置</li>
+<li><code>docs/设计规范/知微设计系统.html</code>：UI 设计系统（知微设计系统）</li>
+</ul>
+<h3>1.4 用语定义</h3>
+<table>
+<thead><tr><th>用语</th><th>定义</th></tr></thead>
+<tbody>
+<tr><td>渠道（channel）</td><td>消息来源平台：<code>qqbot</code> / <code>telegram</code> / <code>wecom</code>（预留）/ <code>playground</code>（后台体验台，虚拟渠道）</td></tr>
+<tr><td>会话（conversation）</td><td>渠道 × 聊天 × 用户。群里每个用户各一个会话，上下文互不串</td></tr>
+<tr><td>适配器（adapter）</td><td>实现 <code>channel.Adapter</code> 的渠道实现，只负责协议翻译，不含业务规则</td></tr>
+<tr><td>设置分区</td><td><code>system_settings</code> 表的一行（key → JSON），如 <code>llm</code>、<code>channel.qqbot</code></td></tr>
+<tr><td>预检索</td><td>调模型前先用用户问题检索知识库，把候选片段注入本轮 user 消息</td></tr>
+<tr><td>转人工（handoff）</td><td>会话进入人工接待态，自动回复暂停，直到后台「恢复自动」或超时</td></tr>
+<tr><td>哨兵 <code>__NO_ANSWER__</code></td><td>模型判断无需回复时输出的固定串，回复闸门一律吞掉</td></tr>
+</tbody>
+</table>
+
+<h2>2. 前提</h2>
+<h3>2.1 系统构成</h3>
+<pre><code>                ┌──────────── 浏览器（管理员） ────────────┐
+                │  /setup  /login  /admin/*                │
+                └──────────────────┬───────────────────────┘
+                                   │ 同源 HTTP（cookie: zw_session）
+┌──────────────────────────────────▼──────────────────────────────────┐
+│ web/  Next.js 16（App Router，纯客户端页面）                         │
+│   rewrites: /api/*  /webhook/*  →  ZHIWEI_API_ORIGIN(127.0.0.1:8080) │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   │
+┌──────────────────────────────────▼──────────────────────────────────┐
+│ server/  Go 单进程 zhiwei                                           │
+│   httpapi（gin） ── runtime ── settings.Service（进程内缓存）         │
+│        │              │                                              │
+│        │        channel.Registry ── qqbot（WS 网关 / Webhook）       │
+│        │              │            └─ telegram（getUpdates 长轮询）  │
+│        │              │            └─ wecom（预留）                  │
+│        │        agent.Orchestrator ── Brain（LLM 工具循环）          │
+│        │              │                  └─ kb.Index（内存 BM25）    │
+│        └──────────── store（pgx，手写 SQL）                          │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   │
+                         PostgreSQL（原生，无扩展）
+       外部：bots.qq.com / api.sgroup.qq.com、api.telegram.org、LLM 提供方</code></pre>
+<h3>2.2 技术要素</h3>
+<table>
+<thead><tr><th>层</th><th>选型</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>后端</td><td>Go 1.23、gin、pgx/v5、coder/websocket、log/slog</td><td>单二进制部署；长连接（QQ 网关）与并发会话天然适合 goroutine；不引 ORM，SQL 行为可见</td></tr>
+<tr><td>前端</td><td>Next.js 16（<code>create-next-app</code> 官方脚手架）、React 19、Tailwind v4、radix-ui、sonner、next-themes</td><td>主流 React 栈，UI 组件与令牌按知微设计系统实现</td></tr>
+<tr><td>存储</td><td>PostgreSQL 17（docker-compose 提供）</td><td>只依赖原生 PG，不要求 pgvector / zhparser 等扩展</td></tr>
+<tr><td>LLM</td><td>HTTP 直连：OpenAI Chat Completions 或 Anthropic Messages</td><td>不依赖 Claude Code CLI / agent SDK；任意兼容端点（DeepSeek、通义、MiniMax、Kimi、vLLM、Ollama…）可用</td></tr>
+<tr><td>UI 规范</td><td><code>docs/设计规范/知微设计系统.html</code></td><td>主色蓝 #0075FF、墨黑标题、Geist 字族、控件 8px / 卡片 16px 圆角、明暗双主题</td></tr>
+</tbody>
+</table>
+<h3>2.3 前提条件・制约事项</h3>
+<ul>
+<li><strong>env 只保留数据库连接串</strong>：<code>ZHIWEI_DB_DSN</code>（必填）与 <code>ZHIWEI_HTTP_ADDR</code>（可选，缺省 <code>127.0.0.1:8080</code>）；Next 侧可选 <code>ZHIWEI_API_ORIGIN</code>。管理员、LLM 凭据、渠道凭据、回复策略全部存 PG，经向导 / 后台修改，<strong>改配置不重启</strong>。</li>
+<li><strong>单实例</strong>：Telegram 同一 token 只允许一个 <code>getUpdates</code> 消费者（第二个 409）；QQ WebSocket 网关一个分片一条连接；会话串行队列与登录限速都在进程内。水平扩展需先把这三处外置（二期）。</li>
+<li>Go 服务默认只监听回环地址，由 Next 反代；QQ webhook 模式需要公网 HTTPS 时只暴露 Next（<code>/webhook/*</code> 已在 rewrites 中转发）。</li>
+<li>QQ 官方机器人缺省只收 @ 消息；开放平台开通「接收所有消息」后可订阅群全量消息（<code>GROUP_MESSAGE_CREATE</code>）。回复优先被动回复（群 5 分钟 / 5 次，单聊 60 分钟 / 4 次），超窗自动改发主动消息（群：Bot 60/qpm、未认证 30/qpm，单群 20/qpm 且每天 1000 条）。</li>
+</ul>
+
+<h2>3. 功能一览</h2>
+<table>
+<thead><tr><th>编号</th><th>功能</th><th>说明</th><th>设计书</th></tr></thead>
+<tbody>
+<tr><td>F-01</td><td>初始化向导</td><td>首次启动打印一次性口令，向导写入管理员 / 品牌 / LLM / 渠道</td><td>FA-DD-002</td></tr>
+<tr><td>F-02</td><td>管理员认证</td><td>用户名密码登录、httpOnly 会话 cookie、IP 失败锁定、改密</td><td>FA-DD-002</td></tr>
+<tr><td>F-03</td><td>QQ 官方机器人</td><td>WebSocket 网关 / Webhook 回调二选一；群 @、单聊、频道 @、频道私信</td><td>FA-DD-003</td></tr>
+<tr><td>F-04</td><td>Telegram</td><td>long polling；私聊 + 群内 @ / 回复机器人</td><td>FA-DD-003</td></tr>
+<tr><td>F-05</td><td>企业微信（预留）</td><td>设置分区与适配器包占位，接口契约已定义</td><td>FA-DD-003</td></tr>
+<tr><td>F-06</td><td>客服 Agent</td><td>触发判定、关键词命令、会话串行队列、预检索、LLM 工具循环、拆条发送、兜底</td><td>FA-DD-004</td></tr>
+<tr><td>F-07</td><td>知识库</td><td>Markdown 文档按目录管理、批量导入、自动切块、关键词（BM25）+ 向量混合检索、检索测试</td><td>FA-DD-005</td></tr>
+<tr><td>F-08</td><td>会话与人工接管</td><td>会话列表 / 消息流、转人工、人工回复、恢复自动、超时自动恢复、重置上下文</td><td>FA-DD-006</td></tr>
+<tr><td>F-09</td><td>管理后台</td><td>总览、体验台、系统设置（分区表单、密钥掩码、即时生效）</td><td>FA-DD-007</td></tr>
+</tbody>
+</table>
+
+<h2>4. 功能详细</h2>
+<h3>4.1 进程启动（S-01…）</h3>
+<ol>
+<li>S-01 读 env（<code>config.Load</code>），缺 DSN 直接退出。</li>
+<li>S-02 连接 PG（5 秒 ping），执行内嵌迁移（<code>store.Migrate</code>：advisory lock 串行、checksum 防篡改、每文件一个事务）。</li>
+<li>S-03 加载全部设置分区（缺省值打底，库里字段覆盖），从 <code>kb_chunks</code> 重建检索索引。</li>
+<li>S-04 <code>runtime.Apply</code>：配置 LLM 客户端；若 <code>setup.completed</code> 为真，按开关启动渠道适配器。</li>
+<li>S-05 未初始化时生成 8 位数字口令并以 WARN 打印 <code>setupCode=…</code>。</li>
+<li>S-06 启动人工超时扫描（每分钟）与 HTTP 服务；SIGINT/SIGTERM 时优雅关闭（10 秒）并停掉全部适配器。</li>
+</ol>
+<h3>4.2 一条消息的处理链</h3>
+<pre><code>sequenceDiagram
+  participant P as 平台(QQ/TG)
+  participant A as Adapter
+  participant O as Orchestrator
+  participant DB as PostgreSQL
+  participant B as Brain
+  participant L as LLM
+  P->>A: 事件(WS Dispatch / Webhook / getUpdates)
+  A->>O: Handle(Inbound)
+  O->>O: 触发判定(@ / 私聊) + 群白名单
+  O->>DB: UpsertConversation + AddMessage(入站去重)
+  O->>O: 关键词命令(重置/帮助/人工) 或 人工中则静默
+  O->>O: 入会话队列(运行中则并批)
+  O->>B: Run(history, texts, quoted)
+  B->>B: 预检索 kb.Search
+  loop 最多 MaxToolRounds 轮
+    B->>L: Chat(system 恒定, messages, tools)
+    L-->>B: content / tool_calls
+    B->>B: 执行 kb_search / transfer_to_human
+  end
+  B-->>O: reply / handoff / usage
+  O->>DB: llm_calls、handoffs
+  O->>A: Send(拆条, 首条引用原消息)
+  O->>DB: AddMessage(out)</code></pre>
+<h3>4.3 设置变更与热装配</h3>
+<ul>
+<li>后台 <code>PUT /api/settings</code> → <code>settings.Service.Save</code>：校验 → 只写有变化的分区 → 更新内存快照 → 广播 → <code>runtime.Apply</code>。</li>
+<li><code>Apply</code> 由互斥锁串行化：先 <code>Orchestrator.Configure</code> 换 LLM 客户端与快照，再 <code>Registry.Replace</code>：<strong>先停旧适配器再起新的</strong>。正在进行的推理轮次使用旧快照跑完。</li>
+<li>LLM 配置不完整时 Brain 为 nil：渠道照常收消息、落库、响应关键词命令，但跳过自动回复；总览页显示黄色告警。</li>
+</ul>
+<h3>4.4 关键设计取舍</h3>
+<table>
+<thead><tr><th>选择</th><th>没有采用的做法</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td><code>internal/llm</code> HTTP 直连 + <code>internal/agent</code> 自写工具循环</td><td>拉起本地 agent CLI / agent SDK</td><td>不依赖 CLI、MCP 子进程与 transcript 文件；历史由 <code>messages</code> 表重建；任意兼容端点可用</td></tr>
+<tr><td>QQ 开放平台官方机器人 API v2</td><td>OneBot v11 / NapCat 等第三方协议端</td><td>官方通道，无需托管个人 QQ 账号；全量群消息需在开放平台开通「接收所有消息」，开通后主动回复与反思沉淀才有素材（FA-DD-008 / 009）</td></tr>
+<tr><td>手写 Telegram Bot API 客户端（getUpdates / sendMessage）</td><td>引入第三方 Bot 框架</td><td>只用到少数接口，自写可控；按 UTF-16 偏移切 @、成功一次即恢复已连接状态</td></tr>
+<tr><td>PostgreSQL + 内存 BM25（中文 bigram）+ 可选向量（独立 TEI 嵌入服务，bge-small-zh，向量存 PG <code>REAL[]</code>）</td><td>SQLite + 向量扩展 + 进程内本地嵌入模型</td><td>Go 进程保持纯 Go 无 native 依赖；嵌入服务不可用时退回纯关键词</td></tr>
+<tr><td><code>system_settings</code> 分区 KV + 初始化向导 + 管理员账号</td><td>单行 JSON 配置 + env 播种 + 静态管理令牌</td><td>env 只剩 DSN，其余配置都在后台改</td></tr>
+<tr><td>conversations(channel, chat_id, user_id) + context_since + 空闲截断</td><td>按会话键续接 + resume TTL</td><td>按消息时间间隔截断，无额外状态，不会因 TTL 被反复刷新而失效，见 FA-DD-004</td></tr>
+<tr><td>会话串行队列 + 运行中到达的消息并批</td><td>无防抖，连发几条各答一次</td><td>同一用户连发 N 条只答一次</td></tr>
+<tr><td>直接函数调用（Handler 回调）</td><td>事件总线（EventEmitter）</td><td>Go 单进程无需事件总线</td></tr>
+</tbody>
+</table>
+<p>其他约定：system prompt 恒定、动态内容放 user 侧（吃 prompt cache）；用户文本定界符 + 剥离伪造定界符；整句匹配的关键词命令；<code>__NO_ANSWER__</code> 哨兵；回复按标点拆条、只有首条引用；出错发兜底文案；人工超时自动恢复；所有外部调用都有硬超时；断线退避重连。</p>
+<h3>4.5 目录结构</h3>
+<pre><code>zhiwei/
+├── docker-compose.yml        PostgreSQL 17 + 可选 embed（TEI 嵌入服务）
+├── .env.example              ZHIWEI_DB_DSN
+├── server/                   Go 服务
+│   ├── cmd/zhiwei/          入口
+│   ├── db/migrations/pg/     内嵌 SQL 迁移
+│   └── internal/
+│       ├── config/           env
+│       ├── store/            pgx 仓储（唯一持久层）
+│       ├── settings/         设置分区 + 校验 + 掩码
+│       ├── runtime/          按设置装配渠道与大脑
+│       ├── channel/          Adapter 契约 + Registry + qqbot / telegram / wecom
+│       ├── llm/              openai / anthropic 协议
+│       ├── kb/               切块 + BM25 + 向量混合检索
+│       ├── embed/            OpenAI 兼容 /embeddings 客户端
+│       ├── agent/            编排器 + 工具循环 + 提示词 + 后台扫描器
+│       ├── skill/            SKILL.md 解析
+│       ├── catalog/          实时模型目录
+│       ├── media/            图片下载与缩放
+│       ├── logbuf/           内存日志缓冲（运行日志页）
+│       └── httpapi/          REST + webhook + 认证
+├── web/                      Next.js 16（create-next-app）
+│   └── src/{app,components,lib}
+└── docs/{设计书,设计规范}</code></pre>
+<h3>4.6 功能路线</h3>
+<table>
+<thead><tr><th>能力</th><th>状态与说明</th></tr></thead>
+<tbody>
+<tr><td>反思沉淀 / 整理 / 升格</td><td>v0.2 已实装（FA-DD-009）。可扩展：把后台人工回复（<code>direction=human</code>）也作为沉淀来源</td></tr>
+<tr><td>主动补位、入群欢迎、入群审核</td><td>v0.2 已实装（FA-DD-008）</td></tr>
+<tr><td>按群策略</td><td>已实装（FA-DD-008 4.6）：设置分区 <code>groups</code>，覆盖主动回复 / 静默阈值 / 欢迎 / 审核 / 反思 / 排行；转人工通知随管理群通知一起不做</td></tr>
+<tr><td>问题主题排行</td><td>已实装（FA-DD-008 4.7）：群时间线 + 私聊消息，增加趋势与改名 / 合并 / 删除</td></tr>
+<tr><td>图片识别</td><td>已实装（FA-DD-004 4.12）：QQ 附件 / TG photo 下载缩放后随 user 消息交给模型，模型拒收时去图重试</td></tr>
+<tr><td>用量统计 / 运行日志</td><td>已实装（FA-DD-007 4.7 / 4.8）：直接按 <code>llm_calls</code> 聚合，不另建内存累计或日表；日志为内存环形缓冲</td></tr>
+<tr><td>管理群通知 / 群内审核指令</td><td>不做：转人工、沉淀审核都在后台处理，不在群里发通知或收审核指令</td></tr>
+<tr><td>入站意图拦截</td><td>不做：批量套取资料、探问提示词等意图由 system prompt 的保密与业务范围规则兜底，省掉每条消息一次额外的分类调用</td></tr>
+<tr><td>向量检索</td><td>v0.4 已实装（FA-DD-005 v0.3）：外部嵌入服务 + 进程内余弦，与 BM25 融合；未用 pgvector</td></tr>
+<tr><td>技能（SKILL.md）</td><td>已实装（FA-DD-010）：只取文字说明，脚本不执行</td></tr>
+<tr><td>实时模型目录</td><td>已实装：内置工具 <code>model_catalog</code>（FA-DD-004 4.7.1），缺省关闭</td></tr>
+<tr><td>业务插件工具</td><td>规划：在 <code>agent.tools</code> 注册「HTTP 工具」：后台配置 URL / 参数 schema / 描述；可挂在技能下，让技能带上可执行的查询</td></tr>
+<tr><td>企业微信</td><td>规划：实现 <code>channel.WebhookAdapter</code>，见 FA-DD-003 4.4</td></tr>
+</tbody>
+</table>
+
+<h2>5. 数据定义</h2>
+<h3>5.1 DB 表定义</h3>
+<table>
+<thead><tr><th>表</th><th>用途</th><th>详见</th></tr></thead>
+<tbody>
+<tr><td><code>schema_migrations</code></td><td>已应用迁移 + checksum</td><td>本书 4.1</td></tr>
+<tr><td><code>system_settings</code></td><td>设置分区 KV</td><td>FA-DD-007</td></tr>
+<tr><td><code>admin_users</code> / <code>admin_sessions</code></td><td>管理员与登录会话</td><td>FA-DD-002</td></tr>
+<tr><td><code>conversations</code> / <code>messages</code></td><td>会话与消息</td><td>FA-DD-006</td></tr>
+<tr><td><code>handoffs</code></td><td>转人工工单</td><td>FA-DD-006</td></tr>
+<tr><td><code>kb_documents</code> / <code>kb_chunks</code></td><td>知识库</td><td>FA-DD-005</td></tr>
+<tr><td><code>llm_calls</code></td><td>每轮推理的用量与错误</td><td>FA-DD-004</td></tr>
+</tbody>
+</table>
+<p>迁移纪律：文件名 <code>&lt;14 位 UTC 时间戳&gt;_&lt;snake_case&gt;.sql</code>；已应用文件永不修改（checksum 不一致拒绝启动）；不写 down 迁移；seed 也是迁移且一律 <code>ON CONFLICT DO NOTHING</code>。</p>
+<h3>5.2 设置分区（system_settings key）</h3>
+<p><code>setup</code>、<code>brand</code>、<code>llm</code>、<code>agent</code>、<code>channel.qqbot</code>、<code>channel.telegram</code>、<code>channel.wecom</code>。字段见 FA-DD-007 第 7 章。</p>
+
+<h2>6. 错误一览</h2>
+<table>
+<thead><tr><th>场景</th><th>表现</th></tr></thead>
+<tbody>
+<tr><td>未设置 <code>ZHIWEI_DB_DSN</code></td><td>启动失败：<code>ZHIWEI_DB_DSN 未设置</code></td></tr>
+<tr><td>PG 不可达</td><td>启动失败：<code>连接 PostgreSQL: …</code></td></tr>
+<tr><td>迁移文件名不合规</td><td>启动失败：<code>迁移文件名不合规: …</code></td></tr>
+<tr><td>已应用迁移被修改</td><td>启动失败：<code>已应用的迁移 … 内容被修改（checksum 不一致），请还原文件并新增迁移</code></td></tr>
+<tr><td>API 通用</td><td>失败统一 <code>{"error":"…"}</code>：400 <code>请求格式错误</code> / <code>ID 非法</code>，404 <code>记录不存在</code>，500 <code>服务器内部错误</code>；各功能错误见对应设计书</td></tr>
+</tbody>
+</table>
+
+<h2>7. 配置项</h2>
+<table>
+<thead><tr><th>env</th><th>位置</th><th>缺省</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>ZHIWEI_DB_DSN</code></td><td>server</td><td>（必填）</td><td>PostgreSQL 连接串</td></tr>
+<tr><td><code>ZHIWEI_HTTP_ADDR</code></td><td>server</td><td><code>127.0.0.1:8080</code></td><td>Go 服务监听地址</td></tr>
+<tr><td><code>ZHIWEI_API_ORIGIN</code></td><td>web</td><td><code>http://127.0.0.1:8080</code></td><td>Next rewrites 的后端地址</td></tr>
+</tbody>
+</table>
+</main>
+</body>
+</html>
