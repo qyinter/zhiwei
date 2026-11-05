@@ -28,6 +28,7 @@
 <tr><td>0.1</td><td>2026-10-24</td><td>初版实装：主动补位、入群欢迎、入群审核；事件来源为 QQ 官方 GROUP_MEMBER_ADD / GROUP_JOIN_REQUEST 与 TG new_chat_members</td></tr>
 <tr><td>0.2</td><td>2026-10-24</td><td>QQ 欢迎语支持自定义 Markdown（formatQq）、{at} / {brand} / {ask:问题} 占位、样式预设、实时预览与发送测试</td></tr>
 <tr><td>0.3</td><td>2026-10-25</td><td>按群设置（4.6，覆盖主动回复 / 静默阈值 / 欢迎 / 审核 / 反思 / 排行）；问题排行（4.7，含私聊来源、趋势、改名 / 合并 / 删除）；群时间线写入图片占位</td></tr>
+<tr><td>0.4</td><td>2026-11-05</td><td>入群审核支持 Telegram：申请不带答案时私聊申请人索取（<code>join_pending</code>，超时自动拒绝 / 留给管理员），核对接口为空时由模型按审核标准判定；新增群消息治理（4.8：规则层 + 模型层，删消息 / 禁言 / 封禁、累计升级封禁、误判恢复，<code>group_members</code> / <code>moderation_actions</code>）；按群设置新增 moderation</td></tr>
 </tbody>
 </table>
 <hr>
@@ -54,10 +55,11 @@
 
 <h2>2. 前提</h2>
 <h3>2.1 系统构成</h3>
-<p>入站事件经编排器 <code>Handle</code> 分流：入群事件 → 欢迎；入群申请 → 审核（独立 goroutine）；群消息 → 写时间线，只有 @ 机器人的继续走问答流程。主动回复是独立后台循环 <code>RunProactive</code>，每轮重新读取设置，改设置无需重启。</p>
+<p>入站事件经编排器 <code>Handle</code> 分流：入群事件 → 记入群时间、欢迎；入群申请 → 审核（独立 goroutine）；私聊 → 有待回答的入群申请时当作验证答案，否则按「响应私聊」开关进入问答；群消息 → 先过治理（规则层命中即丢弃），再写时间线，只有 @ 机器人的继续走问答流程。主动回复是独立后台循环 <code>RunProactive</code>，超时申请由 <code>RunJoinSweeper</code> 每分钟扫一次，都每轮重新读取设置，改设置无需重启。</p>
 <h3>2.2 技术要素</h3>
 <ul>
-<li>可答性判断与后台结构化调用统一走 <code>askJSON</code>：一次无工具、无历史的调用，system 恒定、数据在 user 侧、宽松解析首个 <code>{…}</code>；每次调用记 <code>llm_calls.purpose</code>（judge / reflect / compact / promote）。</li>
+<li>可答性判断与后台结构化调用统一走 <code>askJSON</code>：一次无工具、无历史的调用，system 恒定、数据在 user 侧、宽松解析首个 <code>{…}</code>；每次调用记 <code>llm_calls.purpose</code>（judge / reflect / compact / promote / join_review / moderation）。</li>
+<li>Telegram 的入群申请、入群去重、删消息 / 禁言 / 封禁见 FA-DD-003 4.3 S-06 ~ S-09；QQ 官方机器人没有删消息 / 封禁接口，治理只记录不处置。</li>
 <li>QQ 群成员事件订阅位 <code>GROUP_MEMBER_EVENT (1&lt;&lt;24)</code>，只在入群欢迎或入群审核开启时订阅（未开通权限时订阅会被网关拒绝）。</li>
 </ul>
 <h3>2.3 前提条件・制约事项</h3>
@@ -66,7 +68,8 @@
 <li>QQ 补位回复走被动回复（静默阈值缺省 180 秒，在 5 分钟窗口内）；超窗自动改发主动消息（FA-DD-003）。</li>
 <li>QQ 入群事件 <code>GROUP_MEMBER_ADD</code> 不支持被动回复（event_id 只支持 INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE），欢迎语走主动消息，计入单群每天 1000 条额度。</li>
 <li>QQ 入群事件不带昵称；成员信息接口 <code>GET /v2/groups/{group}/members/{member}</code> 目前仅白名单机器人可用（错误码 11253），因此昵称取「同一用户最近出现过的昵称」，再取不到用「新朋友」。</li>
-<li>入群申请事件只有机器人是群管理员时才会推送；审批接口 60 QPM。入群审核只支持 QQ。</li>
+<li>入群申请事件只有机器人是群管理员时才会推送（QQ 审批接口 60 QPM；TG 需群开启「入群需审批」，机器人勾选「添加成员」）。TG 的申请不带答案，靠私聊验证补上。</li>
+<li>群消息治理的「新成员」只对机器人见过入群事件的人成立；接入前就在群里的成员没有入群记录，按老成员对待（只受关键词与模型层约束）。</li>
 <li>群白名单（<code>agent.allowAllChats / chats</code>）同时约束时间线写入、主动回复、欢迎、审核与问题排行；群策略只在白名单内的群生效。</li>
 </ul>
 
@@ -78,10 +81,12 @@
 <tr><td>F-02</td><td>主动回复扫描</td><td>后台循环 <code>RunProactive</code></td></tr>
 <tr><td>F-03</td><td>主动回复页</td><td><code>GET /api/proactive</code>、<code>PATCH /api/proactive/:id {quality}</code>；<code>/admin/proactive</code></td></tr>
 <tr><td>F-04</td><td>入群欢迎</td><td>QQ <code>GROUP_MEMBER_ADD</code>、TG <code>new_chat_members</code></td></tr>
-<tr><td>F-05</td><td>入群审核</td><td>QQ <code>GROUP_JOIN_REQUEST</code> → <code>POST /v2/groups/{group}/approval_join_request/{member}</code></td></tr>
+<tr><td>F-05</td><td>入群审核</td><td>QQ <code>GROUP_JOIN_REQUEST</code> → <code>POST /v2/groups/{group}/approval_join_request/{member}</code>；TG <code>chat_join_request</code> → 私聊验证 → <code>approveChatJoinRequest</code> / <code>declineChatJoinRequest</code>；超时扫描 <code>RunJoinSweeper</code></td></tr>
 <tr><td>F-06</td><td>入群审核记录页</td><td><code>GET /api/join-requests?page=</code>；<code>/admin/join-requests</code></td></tr>
 <tr><td>F-07</td><td>按群设置 / 群管理页</td><td><code>GET /api/group-policies</code>；保存走 <code>PUT /api/settings {groups:{policies}}</code>；<code>/admin/groups</code></td></tr>
 <tr><td>F-08</td><td>问题归类</td><td>后台循环 <code>RunTopics</code>；<code>POST /api/topics/run</code>（立即归类）</td></tr>
+<tr><td>F-10</td><td>群消息治理</td><td>编排器 <code>moderate</code>（规则层同步、模型层异步）→ <code>Registry.DeleteMessage / MuteMember / BanMember</code></td></tr>
+<tr><td>F-11</td><td>治理记录页</td><td><code>GET /api/moderation?page=</code>、<code>POST /api/moderation/:id/revert</code>；<code>/admin/moderation</code></td></tr>
 <tr><td>F-09</td><td>问题排行页</td><td><code>GET /api/topics?days=&amp;tz=</code>、<code>GET /api/topics/:id/occurrences?days=&amp;tz=&amp;page=</code>、<code>PATCH /api/topics/:id {title}</code>、<code>POST /api/topics/:id/merge {into}</code>、<code>DELETE /api/topics/:id</code>；<code>/admin/topics</code></td></tr>
 </tbody>
 </table>
@@ -150,18 +155,20 @@
 <h3>4.5 入群审核（F-05）</h3>
 <ol>
 <li>S-00 该群入群审核未开启（<code>JoinReviewOn</code>）→ 不处理。</li>
-<li>S-01 事件 <code>GROUP_JOIN_REQUEST</code>：取 <code>verify_info.verify_message</code> 与 <code>review_qa_list[].answer</code>，trim 后按行拼成答案；<code>auto_approved</code> 存在表示平台策略已自动通过 → 只记录 <code>auto</code>。</li>
-<li>S-02 提取 ID：<code>idPattern</code> 外包「前后不紧贴字母数字」，取第一个匹配；无匹配或规则为空则取整段答案。答案为空 → 不调接口直接拒绝。</li>
-<li>S-03 核对：<code>GET {checkUrl}?id=…</code>（保留原 query），5 秒超时；只认 <code>{"status":"ok"}</code>（同意）/ <code>{"status":"error"}</code>（拒绝）。网络错误、超时、非 2xx、其他内容 → 记 <code>pending</code>，不审批，留给管理员在 QQ 里处理。</li>
-<li>S-04 审批：<code>{"op":"approve"|"decline","join_request_id":…,"reject_reason":拒绝理由}</code>；接口出错记 <code>failed</code>。</li>
-<li>S-05 每个申请记一行 <code>join_requests</code>（答案原文、提取 ID、结果、说明）。</li>
+<li>S-01 QQ 事件 <code>GROUP_JOIN_REQUEST</code>：取 <code>verify_info.verify_message</code> 与 <code>review_qa_list[].answer</code>，trim 后按行拼成答案；<code>auto_approved</code> 存在表示平台策略已自动通过 → 只记录 <code>auto</code>。带答案的申请直接进 S-04 判定。</li>
+<li>S-02 TG 事件 <code>chat_join_request</code>（<code>NeedsAnswer</code>）：先记一行 <code>awaiting</code>（答案列暂记申请人 bio，说明「已私聊申请人，等待回复验证」），写 <code>join_pending</code>（过期 = 现在 + <code>timeoutMin</code>），私聊申请人发 <code>question</code>。私聊失败（对方不接受陌生人私聊等）→ 摘掉待回答记录，改记 <code>pending</code>「无法私聊申请人，留给管理员处理：{原因}」。</li>
+<li>S-03 申请人的私聊回复：编排器 <code>Handle</code> 对私聊先查 <code>join_pending</code>（按 channel + user 取最近一条未过期的）；有则这条消息是验证答案，不进入问答。空文字（只发图）→ 回「请用文字回复验证问题。」并继续等；否则先 <code>DELETE</code> 待回答记录（删到的一方才继续：连发多条只处理第一条，也不和超时扫描抢），再进 S-04，结果回写 <code>join_requests</code>（答案换成回复原文）并私聊告知：通过「验证通过，已同意你加入「{群名}」。」、拒绝发 <code>rejectReason</code>（空则「很抱歉，你的入群申请未通过。」）、无法判定「暂时无法完成核对，已转交管理员处理，请耐心等待。」。</li>
+<li>S-04 判定：<code>idPattern</code> 外包「前后不紧贴字母数字」，取第一个匹配；无匹配或规则为空则取整段答案。答案为空 → 不核对直接拒绝（「申请未填写答案」）。配了 <code>checkUrl</code>：<code>GET {checkUrl}?id=…</code>（保留原 query），5 秒超时；只认 <code>{"status":"ok"}</code>（同意）/ <code>{"status":"error"}</code>（拒绝）；网络错误、超时、非 2xx、其他内容 → 记 <code>pending</code>「核对失败，留给管理员处理：{原因}」，不审批。没配 <code>checkUrl</code>：一次 <code>askJSON</code>（purpose <code>join_review</code>，60 秒内），system 恒定，user 侧给审核标准 <code>criteria</code>、申请人昵称、简介（bio）、回答（都经 sanitize），要求输出 <code>{"approve", "reason"}</code>；失败记 <code>pending</code>「模型判定失败，留给管理员处理：{原因}」，成功说明记「模型判定：{reason}」。</li>
+<li>S-05 审批：<code>Registry.ReviewJoin</code>（QQ <code>{"op":"approve"|"decline","join_request_id":…,"reject_reason":拒绝理由}</code>；TG approve / decline 接口，理由走私聊）；接口出错记 <code>failed</code>「…；审批接口出错：{原因}」。</li>
+<li>S-06 超时：<code>RunJoinSweeper</code> 每分钟取最多 50 条已过期的 <code>join_pending</code>，同样先删到再处理：<code>timeoutAction=decline</code> → 拒绝并记 <code>declined</code>「超时未回复，自动拒绝」、私聊「入群验证超时，本次申请已被拒绝；你可以重新申请。」；<code>pending</code> → 记 <code>pending</code>「超时未回复，留给管理员处理」、私聊「入群验证超时，已转交管理员处理。」。</li>
+<li>S-07 每个申请一行 <code>join_requests</code>（答案原文、提取 ID、结果、说明、更新时间）。</li>
 </ol>
 <h3>4.6 按群设置 / 群管理页（F-07）</h3>
 <ol>
-<li>S-01 设置分区 <code>groups</code> = <code>{policies: [GroupPolicy]}</code>。每条以 <code>chat = 渠道:群ID</code> 标识，<code>proactive / welcome / joinReview / reflect / topics</code> 为三态开关（null 跟随全局、true 单独开启、false 单独关闭），<code>silenceSec</code> 为 null 时用全局静默阈值，<code>note</code> 为后台备注。</li>
+<li>S-01 设置分区 <code>groups</code> = <code>{policies: [GroupPolicy]}</code>。每条以 <code>chat = 渠道:群ID</code> 标识，<code>proactive / welcome / joinReview / moderation / reflect / topics</code> 为三态开关（null 跟随全局、true 单独开启、false 单独关闭），<code>silenceSec</code> 为 null 时用全局静默阈值，<code>note</code> 为后台备注。</li>
 <li>S-02 生效值：<code>XxxOn(channel, chatId) = 群策略非 null ? 群策略 : 全局开关</code>。单独开启覆盖全局关闭，反之亦然（群策略覆盖全局）。</li>
 <li>S-03 扫描器每轮先看 <code>AnyXxx()</code>（全局开启或任一群单独开启）决定要不要跑，再逐群过 <code>XxxOn</code>；QQ 群成员事件订阅条件改为 <code>AnyWelcome() || AnyJoinReview()</code>。</li>
-<li>S-04 校验：群标识须匹配 <code>^(qqbot|telegram|wecom):\S+$</code> 且不重复；备注不超过 64 字；静默阈值 0~86400；有任一群开启入群审核时也要求核对接口、有任一群开启欢迎时也做示例内容检查。</li>
+<li>S-04 校验：群标识须匹配 <code>^(qqbot|telegram|wecom):\S+$</code> 且不重复；备注不超过 64 字；静默阈值 0~86400；有任一群开启入群审核时也要求「核对接口或模型审核标准」与私聊验证问题、有任一群开启欢迎时也做示例内容检查。</li>
 <li>S-05 保存：前端整体提交 <code>PUT /api/settings {groups:{policies}}</code>（分区级局部更新，其它分区不动）。<code>Groups.UnmarshalJSON</code> 每次解到全新切片——设置保存是「以当前值为底再覆盖」，复用旧切片会让旧元素里没出现在新 JSON 里的字段残留。全部跟随全局且无备注的策略不保存。系统设置页保存时不回写 <code>groups</code>，避免用打开页面时的旧值覆盖。</li>
 <li>S-06 群管理页列出「会话表里出现过的群 + 群时间线里的群 + 已有策略的群」，按最近消息倒序；每列显示该功能的生效值，单独设置的标品牌色圆点；不在白名单的群置灰。「按群 ID 添加」可给还没出现过的群预先设置。</li>
 </ol>
@@ -187,6 +194,15 @@
 <li>S-08 保留：出现记录保留 <code>retentionDays</code> 天；因此变空且之后没再被归入的主题一并删除。</li>
 </ol>
 
+<h3>4.8 群消息治理（F-10 / F-11）</h3>
+<ol>
+<li>S-00 只处理群里的普通消息（Kind 为空）且该群治理开着（<code>ModerationOn</code>）；发信人为 owner / admin 一律豁免。入群事件（任何渠道）先 upsert <code>group_members</code> 记入群时间；发言人入群不足 <code>newMemberHours</code> 小时算新成员，没有记录按老成员。</li>
+<li>S-01 规则层（同步，在 <code>Handle</code> 里）：关键词黑名单对任何人生效（不区分大小写的子串匹配，命中记「命中关键词「{词}」」）；新成员按开关依次判 发链接（<code>Links</code> 里有不属于 <code>allowDomains</code> 的域名，含子域匹配、忽略 www.）「新成员发送链接」、@ 他人「新成员 @ 其他用户」、转发「新成员转发消息」、发图「新成员发送图片」。命中 → 判定为广告：不写时间线、不回复，处置在后台 goroutine 执行（S-03）。</li>
+<li>S-02 模型层（异步）：规则未命中时，若消息可疑（新成员、带链接 / 转发 / @ 他人、或正文命中联系方式 / 引流话术预筛正则）且 <code>llm</code> 开着 → 一次 <code>askJSON</code>（purpose <code>moderation</code>，30 秒），system 恒定，user 侧给群名、发言人与是否新成员、链接、转发来源、正文（sanitize），要求输出 <code>{"spam", "confidence", "reason"}</code>。不是广告 → 结束；是广告但 <code>confidence &lt; llmMinConfidence</code> → 只记一行 <code>action=none</code>「置信度不足，仅记录」；否则进 S-03。消息此时已写入时间线，S-03 会把它从 <code>group_messages</code> 删掉。模型失败只记日志。</li>
+<li>S-03 处置：动作取 <code>action</code>；<code>banAfter &gt; 0</code> 且动作不是 ban 时，查该人该群 7 天内未恢复且非 none 的记录数，加上本次 ≥ banAfter → 升级为 ban，原因追加「；7 天内第 N 次，升级封禁」。先落 <code>moderation_actions</code>，再依次 <code>DeleteMessage</code>（有 MessageID 时）、mute → <code>MuteMember</code>（到现在 + <code>muteMin</code> 分钟）/ ban → <code>BanMember</code>，最后从时间线删除并回写执行结果：成功 detail 为空，失败拼「删除消息失败：…」「禁言失败：…」「封禁失败：…」（以「；」连接；渠道不支持时原因为「渠道 {name} 不支持群消息治理」）。</li>
+<li>S-04 误判恢复 <code>POST /api/moderation/:id/revert</code>：记录不存在 404；已恢复过 409「该处置已恢复过」；动作为 mute / ban 时先 <code>Registry.Unrestrict</code>（失败 502「解除限制失败：…」），再标记 <code>reverted_at</code>。被删的消息无法恢复。</li>
+<li>S-05 治理记录页列出全部记录（每页 20，15 秒刷新）：发言人、群、消息正文、判定（规则 / 模型 + 原因 + 置信度）、处置与执行结果、误判恢复按钮；已恢复的置灰。记录保留 90 天（随反思循环清理）。</li>
+</ol>
 <h2>5. 数据定义</h2>
 <h3>5.1 DB 表定义</h3>
 <table>
@@ -201,9 +217,17 @@
 <tr><td>poller_cursors.key / at / updated_at</td><td>VARCHAR(255) PK / TIMESTAMPTZ</td><td>at = 游标位置，updated_at = 上次推进时间</td></tr>
 <tr><td>proactive_replies.*</td><td></td><td>channel、chat_id、user_id、user_name、question、answer、quality（ok / bad / ''）、created_at</td></tr>
 <tr><td>join_requests.answer / extracted_id</td><td>TEXT / VARCHAR(255)</td><td></td></tr>
-<tr><td>join_requests.decision</td><td>VARCHAR(16)</td><td>approved / declined / pending / auto / failed</td></tr>
-<tr><td>join_requests.detail</td><td>TEXT</td><td>核对接口返回或错误原因</td></tr>
-<tr><td>llm_calls.purpose</td><td>VARCHAR(16) DEFAULT 'reply'</td><td>reply / proactive / judge / reflect / compact / promote / topic</td></tr>
+<tr><td>join_requests.decision</td><td>VARCHAR(16)</td><td>approved / declined / pending / auto / failed / awaiting（已私聊申请人，等待回复）</td></tr>
+<tr><td>join_requests.detail / updated_at</td><td>TEXT / TIMESTAMPTZ</td><td>核对接口返回或错误原因；等待中的记录拿到结果后回写</td></tr>
+<tr><td>join_pending.channel / user_id / chat_id</td><td>VARCHAR，PK</td><td>等待申请人私聊回答的申请；回复按 (channel, user_id) 取最近一条未过期的</td></tr>
+<tr><td>join_pending.chat_title / user_name / request_id / bio</td><td>VARCHAR / TEXT</td><td>bio = 申请时的个人简介，交给模型审核时参考</td></tr>
+<tr><td>join_pending.record_id / expires_at</td><td>BIGINT FK join_requests ON DELETE CASCADE / TIMESTAMPTZ</td><td>索引 (expires_at)</td></tr>
+<tr><td>group_members.channel / chat_id / user_id</td><td>VARCHAR，PK</td><td>机器人见到的入群事件；user_name、joined_at（重新入群以最新为准）</td></tr>
+<tr><td>moderation_actions.channel / chat_id / chat_title / user_id / user_name / message_id</td><td>VARCHAR / TEXT</td><td>索引 (created_at DESC)、(channel, chat_id, user_id, created_at DESC)</td></tr>
+<tr><td>moderation_actions.content</td><td>TEXT</td><td>被处置消息正文（截到 500 字，图片占位）</td></tr>
+<tr><td>moderation_actions.source / reason / confidence</td><td>VARCHAR(16) / TEXT / REAL</td><td>rule / llm；命中规则或模型理由；模型置信度（规则为 1）</td></tr>
+<tr><td>moderation_actions.action / detail / reverted_at</td><td>VARCHAR(16) / TEXT / TIMESTAMPTZ</td><td>none / delete / mute / ban；执行失败原因（成功为空）；误判恢复时间</td></tr>
+<tr><td>llm_calls.purpose</td><td>VARCHAR(16) DEFAULT 'reply'</td><td>reply / proactive / judge / reflect / compact / promote / topic / join_review / moderation</td></tr>
 <tr><td>question_topics.title</td><td>VARCHAR(255) UNIQUE</td><td>主题名称</td></tr>
 <tr><td>question_topics.updated_at</td><td>TIMESTAMPTZ</td><td>最近一次被归入的时间（越活跃越先交给模型参考）</td></tr>
 <tr><td>question_occurrences.topic_id</td><td>BIGINT FK ON DELETE CASCADE</td><td>索引 (topic_id, asked_at DESC)</td></tr>
@@ -213,7 +237,7 @@
 </tbody>
 </table>
 <h3>5.2 设置分区（system_settings key）</h3>
-<p><code>proactive</code>、<code>welcome</code>、<code>joinReview</code>、<code>topics</code>、<code>groups</code>（字段见第 7 章）；<code>channel.qqbot.groupAll</code>。迁移 <code>20261025100000_usage_images_topics.sql</code>。</p>
+<p><code>proactive</code>、<code>welcome</code>、<code>joinReview</code>、<code>topics</code>、<code>groups</code>、<code>moderation</code>（字段见第 7 章）；<code>channel.qqbot.groupAll</code>。迁移 <code>20261025100000_usage_images_topics.sql</code>、<code>20261105090000_tg_group_guard.sql</code>。</p>
 
 <h2>6. 错误一览</h2>
 <table>
@@ -224,8 +248,21 @@
 <tr><td>400</td><td>QQ 欢迎语里还有预设的示例内容（example.com 网址或 QQ 10000），请换成你们自己的再开启入群欢迎</td></tr>
 <tr><td>400</td><td>请选择测试群</td></tr>
 <tr><td>502</td><td>发送失败：{平台错误 / 欢迎语为空}</td></tr>
-<tr><td>400</td><td>开启入群审核需要填写以 http:// 或 https:// 开头的核对接口</td></tr>
+<tr><td>400</td><td>入群审核的核对接口需以 http:// 或 https:// 开头</td></tr>
+<tr><td>400</td><td>开启入群审核需要填写核对接口，或填写模型审核标准</td></tr>
+<tr><td>400</td><td>开启入群审核需要填写私聊验证问题</td></tr>
 <tr><td>400</td><td>入群审核的 ID 提取规则不是合法的正则表达式</td></tr>
+<tr><td>400</td><td>入群审核的回复时限需在 1~1440 分钟之间</td></tr>
+<tr><td>400</td><td>入群审核的超时处理只支持 decline / pending</td></tr>
+<tr><td>400</td><td>群消息治理的新成员时长需在 1~720 小时之间</td></tr>
+<tr><td>400</td><td>群消息治理的模型置信度阈值需在 0~1 之间</td></tr>
+<tr><td>400</td><td>群消息治理的处置动作只支持 delete / mute / ban</td></tr>
+<tr><td>400</td><td>群消息治理的禁言时长需在 1~525600 分钟之间</td></tr>
+<tr><td>400</td><td>群消息治理的升级封禁次数需在 0~20 之间</td></tr>
+<tr><td>400</td><td>群消息治理的关键词不超过 200 条 / 群消息治理的关键词每条不超过 64 字</td></tr>
+<tr><td>400</td><td>群消息治理的放行域名「{domain}」格式不对，只填域名（如 example.com）</td></tr>
+<tr><td>409</td><td>该处置已恢复过</td></tr>
+<tr><td>502</td><td>解除限制失败：{渠道错误}</td></tr>
 <tr><td>400</td><td>主动回复静默阈值需在 0~86400 秒之间</td></tr>
 <tr><td>400</td><td>主动回复扫描间隔需在 1~3600 秒之间</td></tr>
 <tr><td>400</td><td>主动回复单次最多补位数需在 1~20 之间</td></tr>
@@ -244,7 +281,8 @@
 <tr><td>404</td><td>记录不存在</td></tr>
 </tbody>
 </table>
-<p>入群审核记录的说明（照抄实现）：「平台入群策略已自动通过」「申请未填写答案」「核对接口返回 ok / error」「核对失败，留给管理员处理：{原因}」「…；审批接口出错：{原因}」。核对接口原因：「核对接口返回 HTTP {状态}」「核对接口返回无法识别：{正文前 200 字}」。</p>
+<p>入群审核记录的说明（照抄实现）：「平台入群策略已自动通过」「已私聊申请人，等待回复验证」「无法私聊申请人，留给管理员处理：{原因}」「申请未填写答案」「核对接口返回 ok / error」「核对失败，留给管理员处理：{原因}」「模型判定失败，留给管理员处理：{原因}」「模型判定：{reason}」「超时未回复，自动拒绝」「超时未回复，留给管理员处理」「超时未回复；审批接口出错：{原因}」「…；审批接口出错：{原因}」。核对接口原因：「核对接口返回 HTTP {状态}」「核对接口返回无法识别：{正文前 200 字}」。</p>
+<p>治理记录的说明：「置信度不足，仅记录」；执行失败「删除消息失败：{原因}」「禁言失败：{原因}」「封禁失败：{原因}」（多个以「；」连接）。</p>
 
 <h2>7. 配置项</h2>
 <table>
@@ -258,9 +296,18 @@
 <tr><td>welcome.formatQq</td><td>markdown</td><td>markdown / text</td></tr>
 <tr><td>welcome.messageQq</td><td>卡片样式（<code>settings.DefaultWelcomeQQ</code>）</td><td></td></tr>
 <tr><td>welcome.messageTg</td><td>Welcome {name}! Feel free to @mention me if you have any questions.</td><td></td></tr>
-<tr><td>joinReview.enabled</td><td>false</td><td>仅 QQ</td></tr>
-<tr><td>joinReview.checkUrl</td><td>""</td><td>开启时必填，例如 <code>https://example.com/api/member-check</code></td></tr>
+<tr><td>joinReview.enabled</td><td>false</td><td>QQ / Telegram</td></tr>
+<tr><td>joinReview.checkUrl</td><td>""</td><td>例如 <code>https://example.com/api/member-check</code>；与 criteria 至少填一个</td></tr>
 <tr><td>joinReview.idPattern</td><td><code>[A-Za-z0-9]{10}</code></td><td>空 = 整段答案</td></tr>
+<tr><td>joinReview.criteria</td><td>""</td><td>模型审核标准，核对接口为空时生效</td></tr>
+<tr><td>joinReview.question</td><td>你好！为了挡住广告号，入群前需要简单验证：请回复你的用户 ID（在控制台·个人设置里复制）。</td><td>TG 私聊验证问题</td></tr>
+<tr><td>joinReview.timeoutMin / timeoutAction</td><td>30 / decline</td><td>回复时限（1~1440）；超时自动拒绝或留给管理员</td></tr>
+<tr><td>moderation.enabled</td><td>false</td><td>全局开关</td></tr>
+<tr><td>moderation.newMemberHours</td><td>24</td><td>新成员时长（1~720）</td></tr>
+<tr><td>moderation.newMemberLinks / newMemberMentions / newMemberForwards / newMemberMedia</td><td>true / true / true / false</td><td>新成员规则开关</td></tr>
+<tr><td>moderation.keywords / allowDomains</td><td>[] / []</td><td>关键词黑名单（≤200 条、每条 ≤64 字）；放行域名</td></tr>
+<tr><td>moderation.llm / llmMinConfidence</td><td>true / 0.8</td><td>模型层开关与处置所需置信度</td></tr>
+<tr><td>moderation.action / muteMin / banAfter</td><td>mute / 1440 / 2</td><td>处置动作；禁言分钟数（1~525600）；7 天内累计升级封禁次数（0 不升级）</td></tr>
 <tr><td>topics.enabled</td><td>true</td><td>问题排行全局开关（私聊来源只看它）</td></tr>
 <tr><td>topics.scanMin</td><td>10</td><td>扫描间隔（分钟，1~1440）</td></tr>
 <tr><td>topics.windowMax</td><td>50</td><td>单批交给模型的消息数（5~200）</td></tr>
@@ -269,7 +316,7 @@
 <tr><td>joinReview.rejectReason</td><td>未查到该 ID,请在控制台·个人设置复制用户 ID 后重新申请</td><td>QQ 展示给被拒绝的申请人</td></tr>
 </tbody>
 </table>
-<p>代码常量：可答性判断超时 30 秒、核对接口超时 5 秒、TG 管理员缓存 10 分钟、主动回复记录保留 90 天、时间线至少保留 1 天；问题归类静置 2 分钟、冷启动回看 7 天、每来源每轮最多 5 批、交给模型的主题 40 个、本地并入候选 500 个、少于 3 字的消息不送模型、单次归类超时 3 分钟。</p>
+<p>代码常量：可答性判断超时 30 秒、核对接口超时 5 秒、入群审核整轮 60 秒、超时扫描每分钟最多 50 条、TG 管理员缓存 10 分钟、TG 入群去重 2 分钟、治理模型判定 30 秒、累计升级窗口 7 天、处置记录保留 90 天、记录正文 500 字、主动回复记录保留 90 天、时间线至少保留 1 天；问题归类静置 2 分钟、冷启动回看 7 天、每来源每轮最多 5 批、交给模型的主题 40 个、本地并入候选 500 个、少于 3 字的消息不送模型、单次归类超时 3 分钟。</p>
 </main>
 </body>
 </html>

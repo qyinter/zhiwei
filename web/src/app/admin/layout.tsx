@@ -15,6 +15,7 @@ import {
   PuzzleIcon,
   ScrollTextIcon,
   SettingsIcon,
+  ShieldAlertIcon,
   UserCheckIcon,
   UsersRoundIcon,
 } from "lucide-react"
@@ -42,6 +43,7 @@ const NAV = [
     { href: "/admin/proactive", label: "主动回复", icon: MessageCircleReplyIcon },
     { href: "/admin/reflection", label: "反思沉淀", icon: BrainCircuitIcon },
     { href: "/admin/join-requests", label: "入群审核", icon: UserCheckIcon },
+    { href: "/admin/moderation", label: "消息治理", icon: ShieldAlertIcon },
   ] },
   { group: "配置", items: [
     { href: "/admin/kb", label: "知识库", icon: BookOpenIcon },

@@ -185,8 +185,9 @@ func TestProactiveAndJoinRecords(t *testing.T) {
 	if counts, _ := st.ProactiveCounts(ctx); counts["qqbot:G1"] != 1 {
 		t.Fatalf("counts = %v", counts)
 	}
-	if err := st.AddJoinRequest(ctx, store.JoinRequestRecord{Channel: "qqbot", ChatID: "G1", UserID: "U9", Decision: store.JoinApproved}); err != nil {
-		t.Fatal(err)
+	rec := store.JoinRequestRecord{Channel: "qqbot", ChatID: "G1", UserID: "U9", Decision: store.JoinApproved}
+	if err := st.AddJoinRequest(ctx, &rec); err != nil || rec.ID == 0 {
+		t.Fatalf("add join = %v id=%d", err, rec.ID)
 	}
 	jr, total, err := st.ListJoinRequests(ctx, 1, 20)
 	if err != nil || total != 1 || len(jr) != 1 || jr[0].Decision != store.JoinApproved {
@@ -441,5 +442,117 @@ func TestTopicAdmin(t *testing.T) {
 	all, _ := st.QuestionTopics(ctx, 10)
 	if len(all) != 1 || all[0].Title != "退款流程" {
 		t.Fatalf("prune 后：%+v", all)
+	}
+}
+
+func TestJoinPendingAndModeration(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	// 等待回答的申请：登记 → 取最近一条 → 过期扫描 → 回写记录
+	rec := store.JoinRequestRecord{Channel: "telegram", ChatID: "-100", UserID: "7", Decision: store.JoinAwaiting}
+	if err := st.AddJoinRequest(ctx, &rec); err != nil {
+		t.Fatal(err)
+	}
+	wait := store.JoinWait{Channel: "telegram", UserID: "7", ChatID: "-100", ChatTitle: "用户群", RecordID: rec.ID, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := st.PutJoinPending(ctx, wait); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := st.PeekJoinPending(ctx, "telegram", "7")
+	if err != nil || !ok || got.RecordID != rec.ID || got.ChatTitle != "用户群" {
+		t.Fatalf("peek = %+v %v %v", got, ok, err)
+	}
+	if _, ok, _ := st.PeekJoinPending(ctx, "telegram", "8"); ok {
+		t.Fatal("unknown user must have no pending")
+	}
+	if list, _ := st.ExpiredJoinPending(ctx, 10); len(list) != 0 {
+		t.Fatalf("nothing expired yet, got %v", list)
+	}
+	wait.ExpiresAt = time.Now().Add(-time.Minute)
+	if err := st.PutJoinPending(ctx, wait); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.PeekJoinPending(ctx, "telegram", "7"); ok {
+		t.Fatal("expired pending must not be returned by peek")
+	}
+	list, err := st.ExpiredJoinPending(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("expired = %v %v", list, err)
+	}
+	if ok, err := st.DeleteJoinPending(ctx, "telegram", "7", "-100"); err != nil || !ok {
+		t.Fatalf("delete = %v %v", ok, err)
+	}
+	if ok, _ := st.DeleteJoinPending(ctx, "telegram", "7", "-100"); ok {
+		t.Fatal("second delete must report nothing deleted")
+	}
+	rec.Decision, rec.Detail, rec.Answer = store.JoinDeclined, "超时", "无"
+	if err := st.UpdateJoinRequest(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if jr, _, _ := st.ListJoinRequests(ctx, 1, 20); len(jr) != 1 || jr[0].Decision != store.JoinDeclined || jr[0].Answer != "无" {
+		t.Fatalf("updated = %+v", jr)
+	}
+
+	// 入群时间
+	joined := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	if err := st.TouchGroupMember(ctx, "telegram", "-100", "7", "小七", joined); err != nil {
+		t.Fatal(err)
+	}
+	at, ok, err := st.MemberJoinedAt(ctx, "telegram", "-100", "7")
+	if err != nil || !ok || !at.Equal(joined) {
+		t.Fatalf("joined = %v %v %v", at, ok, err)
+	}
+	if _, ok, _ := st.MemberJoinedAt(ctx, "telegram", "-100", "9"); ok {
+		t.Fatal("unknown member must report no join record")
+	}
+
+	// 处置记录：落库 → 回写结果 → 累计次数 → 恢复
+	m := &store.ModerationAction{Channel: "telegram", ChatID: "-100", UserID: "7", Source: store.ModSourceRule, Reason: "新成员发送链接", Action: store.ModActionMute}
+	if err := st.AddModerationAction(ctx, m); err != nil || m.ID == 0 {
+		t.Fatalf("add = %v id=%d", err, m.ID)
+	}
+	if err := st.SetModerationDetail(ctx, m.ID, store.ModActionMute, ""); err != nil {
+		t.Fatal(err)
+	}
+	only := &store.ModerationAction{Channel: "telegram", ChatID: "-100", UserID: "7", Source: store.ModSourceLLM, Reason: "疑似", Action: store.ModActionNone, Confidence: 0.5}
+	if err := st.AddModerationAction(ctx, only); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.ModerationStrikes(ctx, "telegram", "-100", "7", time.Now().Add(-time.Hour)); n != 1 {
+		t.Fatalf("strikes = %d, want 1 (none 不计)", n)
+	}
+	if counts, _ := st.ModerationCounts(ctx); counts["telegram:-100"] != 1 {
+		t.Fatalf("counts = %v", counts)
+	}
+	if ok, err := st.RevertModerationAction(ctx, m.ID); err != nil || !ok {
+		t.Fatalf("revert = %v %v", ok, err)
+	}
+	if ok, _ := st.RevertModerationAction(ctx, m.ID); ok {
+		t.Fatal("second revert must be a no-op")
+	}
+	if n, _ := st.ModerationStrikes(ctx, "telegram", "-100", "7", time.Now().Add(-time.Hour)); n != 0 {
+		t.Fatalf("strikes after revert = %d", n)
+	}
+	got2, err := st.ModerationAction(ctx, m.ID)
+	if err != nil || got2.RevertedAt == nil {
+		t.Fatalf("get = %+v %v", got2, err)
+	}
+	page, total, err := st.ListModerationActions(ctx, 1, 20)
+	if err != nil || total != 2 || len(page) != 2 {
+		t.Fatalf("list = %d %v", total, err)
+	}
+	if _, err := st.ModerationAction(ctx, 999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing = %v", err)
+	}
+
+	// 时间线删除
+	if err := st.AddGroupMessage(ctx, store.GroupMessage{Channel: "telegram", ChatID: "-100", UserID: "7", Content: "广告", PlatformMsgID: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteGroupMessage(ctx, "telegram", "-100", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if chats, _ := st.GroupChats(ctx); len(chats) != 0 {
+		t.Fatalf("timeline should be empty, got %v", chats)
 	}
 }

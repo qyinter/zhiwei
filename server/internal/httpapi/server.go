@@ -108,6 +108,8 @@ func (s *Server) Handler() http.Handler {
 	a.GET("/proactive", s.getProactive)
 	a.PATCH("/proactive/:id", s.markProactive)
 	a.GET("/join-requests", s.listJoinRequests)
+	a.GET("/moderation", s.listModeration)
+	a.POST("/moderation/:id/revert", s.revertModeration)
 	a.GET("/groups", s.listGroups)
 	a.POST("/welcome/test", s.welcomeTest)
 	a.GET("/topics", s.listTopics)

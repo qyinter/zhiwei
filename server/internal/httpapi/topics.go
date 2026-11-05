@@ -168,13 +168,14 @@ type groupEffective struct {
 	JoinReview bool `json:"joinReview"`
 	Reflect    bool `json:"reflect"`
 	Topics     bool `json:"topics"`
+	Moderation bool `json:"moderation"`
 }
 
 func effective(cfg settings.All, ch, chatID string) groupEffective {
 	return groupEffective{
 		Proactive: cfg.ProactiveOn(ch, chatID), SilenceSec: cfg.ProactiveSilence(ch, chatID),
 		Welcome: cfg.WelcomeOn(ch, chatID), JoinReview: cfg.JoinReviewOn(ch, chatID),
-		Reflect: cfg.ReflectOn(ch, chatID), Topics: cfg.TopicsOn(ch, chatID),
+		Reflect: cfg.ReflectOn(ch, chatID), Topics: cfg.TopicsOn(ch, chatID), Moderation: cfg.ModerationOn(ch, chatID),
 	}
 }
 
@@ -260,6 +261,7 @@ func (s *Server) listGroupPolicies(c *gin.Context) {
 		"global": groupEffective{
 			Proactive: cfg.Proactive.Enabled, SilenceSec: cfg.Proactive.SilenceSec, Welcome: cfg.Welcome.Enabled,
 			JoinReview: cfg.JoinReview.Enabled, Reflect: cfg.Reflect.Enabled, Topics: cfg.Topics.Enabled,
+			Moderation: cfg.Moderation.Enabled,
 		},
 		"allowAllChats": cfg.Agent.AllowAllChats,
 		"qqGroupAll":    cfg.QQBot.GroupAll,

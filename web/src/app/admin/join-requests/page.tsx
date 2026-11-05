@@ -12,12 +12,13 @@ import { api, type Paged } from "@/lib/api"
 import { CHANNEL_LABEL, type JoinRequestRecord } from "@/lib/types"
 import { useDelayedLoading } from "@/lib/use-delayed-pending"
 
-const DECISION: Record<JoinRequestRecord["decision"], { label: string; variant: "ok" | "crit" | "warn" | "neutral" }> = {
+const DECISION: Record<JoinRequestRecord["decision"], { label: string; variant: "ok" | "crit" | "warn" | "neutral" | "accent" }> = {
   approved: { label: "已同意", variant: "ok" },
   declined: { label: "已拒绝", variant: "crit" },
   pending: { label: "留给管理员", variant: "warn" },
   auto: { label: "平台已自动通过", variant: "neutral" },
   failed: { label: "审批出错", variant: "crit" },
+  awaiting: { label: "等待回复", variant: "accent" },
 }
 
 export default function JoinRequestsPage() {
@@ -40,7 +41,7 @@ export default function JoinRequestsPage() {
     <>
       <PageHeader
         title="入群审核"
-        description="QQ 生效群的加群申请处理记录：取答案里的 ID 调核对接口，存在则同意、不存在则拒绝，接口不可用时留给管理员在 QQ 里处理。开关与核对接口在「系统设置 → 群运营」。"
+        description="生效群的加群申请处理记录。QQ 取申请时填写的答案；Telegram 由机器人私聊申请人索取答案。按核对接口或模型审核标准判定，无法判定时留给管理员在平台里处理。开关与规则在「系统设置 → 群运营」。"
       />
       <Card className="py-0">
         {loading && !data ? (
@@ -57,7 +58,7 @@ export default function JoinRequestsPage() {
               <TableRow>
                 <TableHead>申请人</TableHead>
                 <TableHead>群</TableHead>
-                <TableHead>答案 / 提取 ID</TableHead>
+                <TableHead>答案 / 简介 / 提取 ID</TableHead>
                 <TableHead>结果</TableHead>
                 <TableHead className="text-right">时间</TableHead>
               </TableRow>

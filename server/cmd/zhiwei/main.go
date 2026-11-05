@@ -75,6 +75,7 @@ func run(log *slog.Logger, logs *logbuf.Ring) error {
 	rt := runtime.New(svc, reg, orch, index, log)
 	rt.Apply(ctx, svc.Get())
 	go orch.RunHandoffSweeper(ctx)
+	go orch.RunJoinSweeper(ctx)
 	go orch.RunProactive(ctx)
 	go orch.RunReflector(ctx)
 	go orch.RunTopics(ctx)

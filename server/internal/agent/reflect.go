@@ -124,6 +124,9 @@ func (o *Orchestrator) pruneTimeline(ctx context.Context, cfg settings.All) {
 	if err := o.st.PruneProactive(ctx, time.Now().Add(-proactiveRetention)); err != nil {
 		o.log.Warn("清理主动回复记录失败", "err", err)
 	}
+	if err := o.st.PruneModeration(ctx, time.Now().Add(-modRetention)); err != nil {
+		o.log.Warn("清理治理记录失败", "err", err)
+	}
 	if n, err := o.st.PruneMessageImages(ctx, time.Now().Add(-imageRetention)); err != nil {
 		o.log.Warn("清理过期图片失败", "err", err)
 	} else if n > 0 {

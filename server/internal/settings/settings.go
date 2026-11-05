@@ -35,6 +35,7 @@ const (
 	KeyCatalog    = "modelCatalog"
 	KeyTopics     = "topics"
 	KeyGroups     = "groups"
+	KeyModeration = "moderation"
 )
 
 type Setup struct {
@@ -129,15 +130,54 @@ const DefaultWelcomeQQ = `# 👋 欢迎加入 {brand}
 2️⃣ 使用问题直接 @我 提问
 3️⃣ 账户、订单类问题找人工客服`
 
-// JoinReview 入群审核（仅 QQ，机器人需是群管理员）：取申请人的验证消息 / 入群问题答案，
-// 按 IDPattern 提取 ID 后 GET {CheckURL}?id=…，{"status":"ok"} 同意、{"status":"error"} 拒绝，
-// 其余情况（超时、非 2xx、其他内容）不处理，留给管理员。
+// JoinReview 入群审核（机器人需是群管理员）。
+// 答案来源：QQ 取申请时填写的验证消息 / 入群问题答案；TG 的申请不带答案，机器人私聊申请人发 Question 索取，
+// 超过 TimeoutMin 未回复按 TimeoutAction 处理。
+// 判定：按 IDPattern 提取 ID 后 GET {CheckURL}?id=…，{"status":"ok"} 同意、{"status":"error"} 拒绝，
+// 其余情况（超时、非 2xx、其他内容）不处理，留给管理员；没填核对接口时交给模型按 Criteria 判断。
 type JoinReview struct {
 	Enabled      bool   `json:"enabled"`
 	CheckURL     string `json:"checkUrl"`
 	RejectReason string `json:"rejectReason"`
 	// IDPattern 从答案里提取 ID 的正则（取第一个匹配，前后不能紧贴字母数字）；空 = 整段答案
 	IDPattern string `json:"idPattern"`
+	// Question 私聊申请人的验证问题（TG）
+	Question string `json:"question"`
+	// Criteria 模型审核标准（核对接口为空时生效）：写明什么样的申请人可以通过
+	Criteria string `json:"criteria"`
+	// TimeoutMin 等待申请人回复的时限（分钟）
+	TimeoutMin int `json:"timeoutMin"`
+	// TimeoutAction 超时处理：decline 自动拒绝 / pending 留给管理员
+	TimeoutAction string `json:"timeoutAction"`
+}
+
+// DefaultJoinQuestion TG 私聊验证问题的缺省值。
+const DefaultJoinQuestion = "你好！为了挡住广告号，入群前需要简单验证：请回复你的用户 ID（在控制台·个人设置里复制）。"
+
+// Moderation 群消息治理：规则层即时处置新成员的链接 / @ / 转发 / 图片与关键词黑名单，
+// 模型层对规则未命中但可疑的消息做一次小模型判断（高置信度才处置，否则只记录）。
+// 群主 / 管理员一律豁免。处置需要渠道支持（TG 机器人为管理员且有删除消息、封禁用户权限）；不支持的渠道只记录。
+type Moderation struct {
+	Enabled bool `json:"enabled"`
+	// NewMemberHours 入群不足这么多小时算新成员（只对机器人见过入群的人生效）
+	NewMemberHours int `json:"newMemberHours"`
+	// 新成员规则：发链接 / @ 其他用户 / 转发消息 / 发图片
+	NewMemberLinks    bool `json:"newMemberLinks"`
+	NewMemberMentions bool `json:"newMemberMentions"`
+	NewMemberForwards bool `json:"newMemberForwards"`
+	NewMemberMedia    bool `json:"newMemberMedia"`
+	// Keywords 关键词黑名单：任何人命中即处置（不区分大小写的子串匹配）
+	Keywords []string `json:"keywords"`
+	// AllowDomains 放行域名（含子域）：指向这些域名的链接不算链接
+	AllowDomains []string `json:"allowDomains"`
+	// LLM 模型层开关；LLMMinConfidence 处置所需的最低置信度（0~1），不足只记录
+	LLM              bool    `json:"llm"`
+	LLMMinConfidence float64 `json:"llmMinConfidence"`
+	// Action 处置动作：delete 仅删消息 / mute 删消息并禁言 MuteMin 分钟 / ban 删消息并封禁
+	Action  string `json:"action"`
+	MuteMin int    `json:"muteMin"`
+	// BanAfter 7 天内累计被处置达到这么多次升级为封禁；0 不升级
+	BanAfter int `json:"banAfter"`
 }
 
 // Proactive 主动回复：群里有人提问且长时间无人应答时谨慎补位。
@@ -218,6 +258,7 @@ type GroupPolicy struct {
 	JoinReview *bool  `json:"joinReview"`
 	Reflect    *bool  `json:"reflect"`
 	Topics     *bool  `json:"topics"`
+	Moderation *bool  `json:"moderation"`
 }
 
 // Groups 按群策略。单群开关覆盖全局：全局关闭时也可以只给某几个群打开，反之亦然。
@@ -298,6 +339,7 @@ type All struct {
 	Catalog    ModelCatalog `json:"modelCatalog"`
 	Topics     Topics       `json:"topics"`
 	Groups     Groups       `json:"groups"`
+	Moderation Moderation   `json:"moderation"`
 }
 
 func Defaults() All {
@@ -321,8 +363,11 @@ func Defaults() All {
 			MessageTG: "Welcome {name}! Feel free to @mention me if you have any questions.",
 		},
 		JoinReview: JoinReview{
-			RejectReason: "未查到该 ID,请在控制台·个人设置复制用户 ID 后重新申请",
-			IDPattern:    "[A-Za-z0-9]{10}",
+			RejectReason:  "未查到该 ID,请在控制台·个人设置复制用户 ID 后重新申请",
+			IDPattern:     "[A-Za-z0-9]{10}",
+			Question:      DefaultJoinQuestion,
+			TimeoutMin:    30,
+			TimeoutAction: "decline",
 		},
 		Proactive: Proactive{SilenceSec: 180, ScanSec: 60, MaxPerScan: 2},
 		Reflect: Reflect{
@@ -334,6 +379,11 @@ func Defaults() All {
 		Catalog:   ModelCatalog{CacheMin: 5},
 		Topics:    Topics{Enabled: true, ScanMin: 10, WindowMax: 50, RetentionDays: 90},
 		Groups:    Groups{Policies: []GroupPolicy{}},
+		Moderation: Moderation{
+			NewMemberHours: 24, NewMemberLinks: true, NewMemberMentions: true, NewMemberForwards: true,
+			Keywords: []string{}, AllowDomains: []string{},
+			LLM: true, LLMMinConfidence: 0.8, Action: "mute", MuteMin: 1440, BanAfter: 2,
+		},
 	}
 }
 
@@ -344,6 +394,7 @@ func (a *All) sections() map[string]any {
 		KeyQQBot: &a.QQBot, KeyTelegram: &a.Telegram, KeyWeCom: &a.WeCom,
 		KeyWelcome: &a.Welcome, KeyJoinReview: &a.JoinReview, KeyProactive: &a.Proactive, KeyReflect: &a.Reflect,
 		KeyEmbedding: &a.Embedding, KeyCatalog: &a.Catalog, KeyTopics: &a.Topics, KeyGroups: &a.Groups,
+		KeyModeration: &a.Moderation,
 	}
 }
 
@@ -475,11 +526,29 @@ func Validate(a All) error {
 	if a.AnyWelcome() && HasWelcomePlaceholder(a.Welcome.MessageQQ) {
 		return errors.New("QQ 欢迎语里还有预设的示例内容（example.com 网址或 QQ 10000），请换成你们自己的再开启入群欢迎")
 	}
-	if jr := a.JoinReview; a.AnyJoinReview() && !strings.HasPrefix(jr.CheckURL, "http://") && !strings.HasPrefix(jr.CheckURL, "https://") {
-		return errors.New("开启入群审核需要填写以 http:// 或 https:// 开头的核对接口")
+	jr := a.JoinReview
+	if jr.CheckURL != "" && !strings.HasPrefix(jr.CheckURL, "http://") && !strings.HasPrefix(jr.CheckURL, "https://") {
+		return errors.New("入群审核的核对接口需以 http:// 或 https:// 开头")
 	}
-	if _, err := regexp.Compile(a.JoinReview.IDPattern); err != nil {
+	if a.AnyJoinReview() {
+		if jr.CheckURL == "" && strings.TrimSpace(jr.Criteria) == "" {
+			return errors.New("开启入群审核需要填写核对接口，或填写模型审核标准")
+		}
+		if strings.TrimSpace(jr.Question) == "" {
+			return errors.New("开启入群审核需要填写私聊验证问题")
+		}
+	}
+	if _, err := regexp.Compile(jr.IDPattern); err != nil {
 		return errors.New("入群审核的 ID 提取规则不是合法的正则表达式")
+	}
+	if jr.TimeoutMin < 1 || jr.TimeoutMin > 1440 {
+		return errors.New("入群审核的回复时限需在 1~1440 分钟之间")
+	}
+	if jr.TimeoutAction != "decline" && jr.TimeoutAction != "pending" {
+		return errors.New("入群审核的超时处理只支持 decline / pending")
+	}
+	if err := validateModeration(a.Moderation); err != nil {
+		return err
 	}
 	pr := a.Proactive
 	if pr.SilenceSec < 0 || pr.SilenceSec > 86400 {
@@ -528,6 +597,40 @@ func Validate(a All) error {
 	} {
 		if c.v < c.lo || c.v > c.hi {
 			return errors.New(c.msg)
+		}
+	}
+	return nil
+}
+
+func validateModeration(m Moderation) error {
+	if m.NewMemberHours < 1 || m.NewMemberHours > 720 {
+		return errors.New("群消息治理的新成员时长需在 1~720 小时之间")
+	}
+	if m.LLMMinConfidence < 0 || m.LLMMinConfidence > 1 {
+		return errors.New("群消息治理的模型置信度阈值需在 0~1 之间")
+	}
+	switch m.Action {
+	case "delete", "mute", "ban":
+	default:
+		return errors.New("群消息治理的处置动作只支持 delete / mute / ban")
+	}
+	if m.MuteMin < 1 || m.MuteMin > 525600 {
+		return errors.New("群消息治理的禁言时长需在 1~525600 分钟之间")
+	}
+	if m.BanAfter < 0 || m.BanAfter > 20 {
+		return errors.New("群消息治理的升级封禁次数需在 0~20 之间")
+	}
+	if len(m.Keywords) > 200 {
+		return errors.New("群消息治理的关键词不超过 200 条")
+	}
+	for _, k := range m.Keywords {
+		if utf8.RuneCountInString(k) > 64 {
+			return errors.New("群消息治理的关键词每条不超过 64 字")
+		}
+	}
+	for _, d := range m.AllowDomains {
+		if strings.ContainsAny(d, "/ :") || d == "" {
+			return fmt.Errorf("群消息治理的放行域名「%s」格式不对，只填域名（如 example.com）", d)
 		}
 	}
 	return nil
@@ -605,6 +708,10 @@ func (a All) TopicsOn(channel, chatID string) bool {
 	return pick(a.Policy(channel, chatID).Topics, a.Topics.Enabled)
 }
 
+func (a All) ModerationOn(channel, chatID string) bool {
+	return pick(a.Policy(channel, chatID).Moderation, a.Moderation.Enabled)
+}
+
 // any 全局开启，或任一群单独开启。
 func (a All) any(global bool, field func(GroupPolicy) *bool) bool {
 	if global {
@@ -636,6 +743,10 @@ func (a All) AnyReflect() bool {
 
 func (a All) AnyTopics() bool {
 	return a.any(a.Topics.Enabled, func(p GroupPolicy) *bool { return p.Topics })
+}
+
+func (a All) AnyModeration() bool {
+	return a.any(a.Moderation.Enabled, func(p GroupPolicy) *bool { return p.Moderation })
 }
 
 // ── 密钥掩码 ──

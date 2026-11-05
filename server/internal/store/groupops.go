@@ -314,6 +314,7 @@ type JoinRequestRecord struct {
 	Decision    string    `json:"decision"`
 	Detail      string    `json:"detail"`
 	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 const (
@@ -322,13 +323,86 @@ const (
 	JoinPending  = "pending"
 	JoinAuto     = "auto"
 	JoinFailed   = "failed"
+	// JoinAwaiting 已私聊申请人索取验证答案，等待回复（TG）
+	JoinAwaiting = "awaiting"
 )
 
-func (s *Store) AddJoinRequest(ctx context.Context, r JoinRequestRecord) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO join_requests (channel, chat_id, user_id, user_name, answer, extracted_id, decision, detail)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		r.Channel, r.ChatID, r.UserID, r.UserName, r.Answer, r.ExtractedID, r.Decision, r.Detail)
+func (s *Store) AddJoinRequest(ctx context.Context, r *JoinRequestRecord) error {
+	return s.pool.QueryRow(ctx, `INSERT INTO join_requests (channel, chat_id, user_id, user_name, answer, extracted_id, decision, detail)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
+		r.Channel, r.ChatID, r.UserID, r.UserName, r.Answer, r.ExtractedID, r.Decision, r.Detail).Scan(&r.ID, &r.CreatedAt)
+}
+
+// UpdateJoinRequest 等待回复的申请拿到结果后回写。
+func (s *Store) UpdateJoinRequest(ctx context.Context, r JoinRequestRecord) error {
+	_, err := s.pool.Exec(ctx, `UPDATE join_requests SET answer = $2, extracted_id = $3, decision = $4, detail = $5, updated_at = now() WHERE id = $1`,
+		r.ID, r.Answer, r.ExtractedID, r.Decision, r.Detail)
 	return err
+}
+
+// JoinWait 等待申请人私聊回答的入群申请（join_pending 表）。
+type JoinWait struct {
+	Channel   string
+	UserID    string
+	ChatID    string
+	ChatTitle string
+	UserName  string
+	RequestID string
+	Bio       string
+	RecordID  int64
+	ExpiresAt time.Time
+}
+
+// PutJoinPending 登记等待回答的申请；同一人对同一群重复申请以最新为准。
+func (s *Store) PutJoinPending(ctx context.Context, p JoinWait) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO join_pending (channel, user_id, chat_id, chat_title, user_name, request_id, bio, record_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (channel, user_id, chat_id) DO UPDATE SET chat_title = EXCLUDED.chat_title, user_name = EXCLUDED.user_name,
+			request_id = EXCLUDED.request_id, bio = EXCLUDED.bio, record_id = EXCLUDED.record_id, created_at = now(), expires_at = EXCLUDED.expires_at`,
+		p.Channel, p.UserID, p.ChatID, p.ChatTitle, p.UserName, p.RequestID, p.Bio, p.RecordID, p.ExpiresAt)
+	return err
+}
+
+// PeekJoinPending 某人最近一条未过期的待回答申请；没有返回 ok=false。
+func (s *Store) PeekJoinPending(ctx context.Context, channel, userID string) (JoinWait, bool, error) {
+	p, err := scanJoinPending(s.pool.QueryRow(ctx, `SELECT `+joinPendingCols+` FROM join_pending
+		WHERE channel = $1 AND user_id = $2 AND expires_at > now() ORDER BY created_at DESC LIMIT 1`, channel, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return JoinWait{}, false, nil
+	}
+	return p, err == nil, err
+}
+
+// ExpiredJoinPending 已过期的待回答申请（最多 limit 条）。
+func (s *Store) ExpiredJoinPending(ctx context.Context, limit int) ([]JoinWait, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+joinPendingCols+` FROM join_pending WHERE expires_at <= now() ORDER BY expires_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []JoinWait
+	for rows.Next() {
+		p, err := scanJoinPending(rows)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+// DeleteJoinPending 摘掉待回答记录；返回是否真的删到了（回复与超时扫描可能同时到，只有删到的一方继续处理）。
+func (s *Store) DeleteJoinPending(ctx context.Context, channel, userID, chatID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM join_pending WHERE channel = $1 AND user_id = $2 AND chat_id = $3`, channel, userID, chatID)
+	return tag.RowsAffected() > 0, err
+}
+
+const joinPendingCols = `channel, user_id, chat_id, chat_title, user_name, request_id, bio, record_id, expires_at`
+
+func scanJoinPending(row pgx.Row) (JoinWait, error) {
+	var p JoinWait
+	err := row.Scan(&p.Channel, &p.UserID, &p.ChatID, &p.ChatTitle, &p.UserName, &p.RequestID, &p.Bio, &p.RecordID, &p.ExpiresAt)
+	return p, err
 }
 
 func (s *Store) ListJoinRequests(ctx context.Context, page, size int) ([]JoinRequestRecord, int, error) {
@@ -339,7 +413,7 @@ func (s *Store) ListJoinRequests(ctx context.Context, page, size int) ([]JoinReq
 	rows, err := s.pool.Query(ctx, `SELECT j.id, j.channel, j.chat_id,
 			COALESCE((SELECT c.title FROM conversations c WHERE c.channel = j.channel AND c.chat_id = j.chat_id AND c.title <> ''
 				ORDER BY c.last_message_at DESC LIMIT 1), ''),
-			j.user_id, j.user_name, j.answer, j.extracted_id, j.decision, j.detail, j.created_at
+			j.user_id, j.user_name, j.answer, j.extracted_id, j.decision, j.detail, j.created_at, j.updated_at
 		FROM join_requests j ORDER BY j.created_at DESC LIMIT $1 OFFSET $2`, size, (page-1)*size)
 	if err != nil {
 		return nil, 0, err
@@ -349,7 +423,7 @@ func (s *Store) ListJoinRequests(ctx context.Context, page, size int) ([]JoinReq
 	for rows.Next() {
 		var r JoinRequestRecord
 		if err := rows.Scan(&r.ID, &r.Channel, &r.ChatID, &r.ChatTitle, &r.UserID, &r.UserName, &r.Answer,
-			&r.ExtractedID, &r.Decision, &r.Detail, &r.CreatedAt); err != nil {
+			&r.ExtractedID, &r.Decision, &r.Detail, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		list = append(list, r)

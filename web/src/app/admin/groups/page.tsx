@@ -19,12 +19,13 @@ import { CHANNEL_LABEL, formatDuration, type GroupEffective, type GroupPolicy, t
 import { useDelayedLoading, useDelayedPending } from "@/lib/use-delayed-pending"
 import { cn } from "@/lib/utils"
 
-type Switchable = "proactive" | "welcome" | "joinReview" | "reflect" | "topics"
+type Switchable = "proactive" | "welcome" | "joinReview" | "moderation" | "reflect" | "topics"
 
 const FEATURES: { key: Switchable; label: string; hint: string; qqOnly?: boolean }[] = [
   { key: "proactive", label: "主动回复", hint: "有人提问长时间没人答时补位" },
   { key: "welcome", label: "入群欢迎", hint: "新成员入群发欢迎语" },
-  { key: "joinReview", label: "入群审核", hint: "按核对接口自动同意 / 拒绝加群申请", qqOnly: true },
+  { key: "joinReview", label: "入群审核", hint: "自动审核加群申请（TG 私聊验证）" },
+  { key: "moderation", label: "消息治理", hint: "挡广告：规则 + 模型判定后删消息 / 禁言" },
   { key: "reflect", label: "反思沉淀", hint: "从群主 / 管理员的答复里提炼知识" },
   { key: "topics", label: "问题排行", hint: "统计这个群里大家常问的问题" },
 ]
@@ -36,6 +37,7 @@ const emptyPolicy = (chat: string): GroupPolicy => ({
   silenceSec: null,
   welcome: null,
   joinReview: null,
+  moderation: null,
   reflect: null,
   topics: null,
 })
