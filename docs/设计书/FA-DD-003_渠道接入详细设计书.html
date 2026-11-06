@@ -30,6 +30,7 @@
 <tr><td>0.3</td><td>2026-10-24</td><td>用户 ID 统一取 author.id；Inbound 新增 Kind / SenderRole / JoinRequest；QQ 群成员事件（1&lt;&lt;24）与入群审批；TG 入群事件与管理员角色</td></tr>
 <tr><td>0.4</td><td>2026-10-24</td><td>Outbound 以 <code>Format</code> 取代 Markdown 开关；回复用精简 Markdown 由渠道渲染（4.6）：QQ 群聊 / 单聊发 Markdown 消息（被拒改发纯文本），Telegram 用 parse_mode=HTML（解析失败改发纯文本）；新增 <code>Outbound.Quote</code>：拆条回复的第一条以引用样式展示（QQ 群聊 / 单聊带 <code>message_reference</code>，取入站事件 <code>message_scene.ext</code> 的 msg_idx）</td></tr>
 <tr><td>0.5</td><td>2026-10-25</td><td>Inbound 新增 <code>Images</code>（图片下载入口，每条最多 4 张）：QQ 取 attachments 里的图片，TG 取 photo / image document（含被引用消息）；TG 只发图不带文字的消息不再丢弃，图片说明里的 @ 改按 <code>caption_entities</code> 判定；QQ 群成员事件订阅条件纳入按群设置（FA-DD-008 4.6）</td></tr>
+<tr><td>0.6</td><td>2026-11-05</td><td>新增 <code>Moderator</code> 契约（删消息 / 禁言 / 封禁 / 解除）；Inbound 新增治理特征 <code>Links / MentionsUser / ForwardFrom</code>，<code>JoinRequest.NeedsAnswer</code>；TG 订阅 <code>chat_join_request</code>（入群申请）与 <code>chat_member</code>（入群去重）、实现 <code>JoinReviewer</code> 与 <code>Moderator</code>、刷新管理员时自检机器人权限；TG 关闭「响应私聊」时私聊仍上报（Mentioned=false），供入群私聊验证使用</td></tr>
 </tbody>
 </table>
 <hr>
@@ -70,19 +71,21 @@
 <li>QQ 被动回复窗口过期或次数用尽（错误码 40034005 / 40034128）时，<code>Send</code> 去掉 msg_id / msg_seq 重发为主动消息；主动消息受频控（群：Bot 60/qpm、未认证 30/qpm，单群 20/qpm、每天 1000 条），用户关闭「允许主动发送」时失败。</li>
 <li>QQ 消息中的 URL 需在开放平台报备域名，否则发送可能被拒——知识库 / 口径中给 QQ 用户的链接应使用已报备域名。</li>
 <li>Telegram 同一 token 只能一个进程轮询；服务器无法直连 <code>api.telegram.org</code> 时把「API 地址」改为自建 Bot API Server 或反代。</li>
+<li>Telegram 入群申请（<code>chat_join_request</code>）、成员变化（<code>chat_member</code>）、删消息、禁言 / 封禁都要求<strong>机器人是群管理员</strong>并勾选「添加成员」「删除消息」「封禁用户」；管理员机器人不受 BotFather Privacy Mode 限制，能收到全量群消息。入群申请只有群开启「入群需审批」才会产生。</li>
+<li>Telegram 的拒绝入群接口不带理由，拒绝理由由编排器私聊申请人；申请期间机器人可向申请人发私聊（对方未点过 Start 也行，<code>user_chat_id</code> 即用户 ID）。</li>
 </ul>
 
 <h2>3. 功能一览</h2>
 <table>
 <thead><tr><th>编号</th><th>功能</th><th>说明</th></tr></thead>
 <tbody>
-<tr><td>F-01</td><td>适配器契约</td><td><code>Adapter{Name, Start, Stop, Send, Status}</code>，可选 <code>WebhookAdapter.ServeWebhook</code></td></tr>
-<tr><td>F-02</td><td>注册表</td><td>整体替换（先停后起）、按渠道发送、状态汇总、webhook 分发</td></tr>
+<tr><td>F-01</td><td>适配器契约</td><td><code>Adapter{Name, Start, Stop, Send, Status}</code>，可选 <code>WebhookAdapter.ServeWebhook</code>、<code>JoinReviewer.ReviewJoin</code>、<code>GroupNamer.GroupName</code>、<code>Moderator{DeleteMessage, MuteMember, BanMember, Unrestrict}</code></td></tr>
+<tr><td>F-02</td><td>注册表</td><td>整体替换（先停后起）、按渠道发送、入群审批、治理动作、状态汇总、webhook 分发</td></tr>
 <tr><td>F-03</td><td>QQ 鉴权</td><td>AppID + AppSecret 换 access_token，过期前 60 秒刷新</td></tr>
 <tr><td>F-04</td><td>QQ WebSocket 网关</td><td>Hello → Identify / Resume → 心跳 → Dispatch；退避重连</td></tr>
 <tr><td>F-05</td><td>QQ Webhook</td><td><code>/webhook/qqbot</code>：op=13 回调验证、Ed25519 验签、op=12 ACK</td></tr>
 <tr><td>F-06</td><td>QQ 事件解析与发送</td><td>群 @、单聊、频道 @、频道私信；被动回复 + msg_seq</td></tr>
-<tr><td>F-07</td><td>Telegram</td><td>getMe、getUpdates 长轮询、@/回复判定（UTF-16 偏移）、sendMessage 4096 硬切</td></tr>
+<tr><td>F-07</td><td>Telegram</td><td>getMe、getUpdates 长轮询（message / chat_join_request / chat_member）、@/回复判定（UTF-16 偏移）、sendMessage 4096 硬切、入群审批、删消息 / 禁言 / 封禁</td></tr>
 <tr><td>F-08</td><td>企业微信（预留）</td><td>设置分区已定义，适配器待实装</td></tr>
 </tbody>
 </table>
@@ -94,19 +97,21 @@
 <tbody>
 <tr><td>Channel / ChatType / ChatID / ChatTitle</td><td>ChatType ∈ <code>group</code> / <code>private</code> / <code>guild</code> / <code>guild_dm</code></td></tr>
 <tr><td>MessageID</td><td>平台消息 ID（入站去重、被动回复）</td></tr>
-<tr><td>Kind</td><td>空 = 消息；<code>member_join</code> 新成员入群；<code>join_request</code> 入群申请（带 <code>JoinRequest{RequestID, Answer, AutoApproved}</code>）</td></tr>
+<tr><td>Kind</td><td>空 = 消息；<code>member_join</code> 新成员入群；<code>join_request</code> 入群申请（带 <code>JoinRequest{RequestID, Answer, AutoApproved, NeedsAnswer}</code>；<code>NeedsAnswer</code> = 申请不带答案、需私聊索取，TG 恒为 true，Answer 填申请人 bio）</td></tr>
 <tr><td>SenderID / SenderName</td><td>QQ 统一取 <code>author.id</code>（实测同一机器人下，同一个人群聊的 member_openid 与单聊的 user_openid 都等于它，2026-10-24），昵称取 <code>author.username</code>（单聊事件不带昵称）</td></tr>
 <tr><td>SenderRole</td><td>群内角色 owner / admin / member：QQ 取 <code>author.member_role</code>，TG 取 getChatAdministrators（缓存 10 分钟）</td></tr>
 <tr><td>Text</td><td>已剥掉 @机器人 的正文（trim）</td></tr>
-<tr><td>Mentioned</td><td>是否 @ / 回复了机器人；私聊恒 true</td></tr>
+<tr><td>Mentioned</td><td>是否 @ / 回复了机器人；私聊在渠道开启「响应私聊」时恒 true，关闭时为 false（此时私聊只用于入群验证等系统流程）</td></tr>
 <tr><td>Quoted</td><td>被引用消息文本（TG 回复消息时）</td></tr>
 <tr><td>Images</td><td>附带的图片 <code>[]Image{ContentType, Size, Open(ctx)}</code>，最多 4 张（<code>channel.MaxImages</code>）。适配器只提供下载入口，下载在编排器的会话 worker 里做（FA-DD-004 4.12），不阻塞事件循环；TG 的下载地址含 token，只在进程内使用，不落库</td></tr>
+<tr><td>Links / MentionsUser / ForwardFrom</td><td>群消息治理用的特征（FA-DD-008 4.8）：消息里的链接（含文字链接目标）、是否 @ 了机器人以外的用户、转发来源类型（TG：user / hidden_user / chat / channel，非转发为空）。平台不提供时为零值</td></tr>
 </tbody>
 </table>
 <ul>
 <li><code>Outbound{ChatType, ChatID, Text, ReplyTo, Seq}</code>：ReplyTo 为被回复的平台消息 ID；Seq 为 QQ <code>msg_seq</code>。</li>
 <li><code>Registry.Replace</code>：先取出旧集合并全部 <code>Stop</code>（等待后台 goroutine 退出），再逐个 <code>Start</code>。启动失败的适配器也登记，状态里可见错误，由其自身退避重试。</li>
 <li><code>Registry.Send</code>：渠道未启用 → 错误 <code>渠道 {name} 未启用</code>。</li>
+<li><code>Registry.ReviewJoin</code> / <code>DeleteMessage</code> / <code>MuteMember</code> / <code>BanMember</code> / <code>Unrestrict</code>：渠道未启用同上；适配器未实现对应接口 → <code>渠道 {name} 不支持入群审批</code> / <code>渠道 {name} 不支持群消息治理</code>（QQ 官方机器人没有删消息 / 封禁接口，不实现 Moderator）。</li>
 <li><code>StatusBox</code>：适配器共用的并发安全状态（enabled / connected / detail / lastError）。</li>
 </ul>
 <h3>4.2 QQ 官方机器人（F-03 ~ F-06）</h3>
@@ -168,7 +173,7 @@
 <h3>4.3 Telegram（F-07）</h3>
 <ol>
 <li>S-01 <code>Start</code>：<code>getMe</code>（15s 超时）取 bot id 与 username，失败返回错误（token 无效时立刻可见）。</li>
-<li>S-02 轮询：<code>getUpdates{offset, timeout:30, allowed_updates:["message"]}</code>，HTTP 客户端超时 45s。失败退避 1s~60s；<strong>任意一次成功即把状态置回已连接</strong>（否则一次失败后会永远显示断开）。</li>
+<li>S-02 轮询：<code>getUpdates{offset, timeout:30, allowed_updates:["message","chat_join_request","chat_member"]}</code>（后两类不显式列出收不到，且要求机器人是管理员），HTTP 客户端超时 45s。失败退避 1s~60s；<strong>任意一次成功即把状态置回已连接</strong>（否则一次失败后会永远显示断开）。</li>
 <li>S-03 offset 只在进程内推进（处理完一条即 <code>update_id+1</code>）。重启后从平台未确认的更新继续，可能重复的少量消息由入站唯一索引去重。</li>
 <li>S-04 解析：文本取 text，没有则取 caption（此时 @ 实体取 <code>caption_entities</code>）；图片取 <code>photo</code> 里不超过 10MB 的最大尺寸，以及 mime 为 image/* 的 <code>document</code>，被回复消息里的图片也带上（下载时先 <code>getFile</code> 换 <code>file_path</code>，再 GET <code>{apiBase}/file/bot{token}/{file_path}</code>）。文本与图片都没有的消息、机器人自己的消息忽略。私聊（开关可关）直接触发；群（group / supergroup）判定 @：
 <ul>
@@ -176,7 +181,11 @@
 <li><code>text_mention</code> 实体：user.id 等于 bot id；</li>
 <li>回复机器人的消息（<code>reply_to_message.from.id == bot id</code>）。</li>
 </ul>
-命中的实体从后往前删掉，保持前面实体偏移不变。被回复消息的文本进 <code>Quoted</code>。频道（channel）类型忽略。</li>
+命中的实体从后往前删掉，保持前面实体偏移不变。被回复消息的文本进 <code>Quoted</code>。频道（channel）类型忽略。同时提取治理特征：<code>url</code> 实体文本与 <code>text_link</code> 的 url 进 <code>Links</code>，不是机器人的 <code>mention</code> / <code>text_mention</code> 置 <code>MentionsUser</code>，<code>forward_origin.type</code> 进 <code>ForwardFrom</code>。私聊在「响应私聊」关闭时仍上报，<code>Mentioned=false</code>。</li>
+<li>S-06 入群申请：<code>chat_join_request</code>（群 / 超级群）→ <code>Kind=join_request</code>，<code>JoinRequest{Answer: bio, NeedsAnswer: true}</code>。审批 <code>approveChatJoinRequest</code> / <code>declineChatJoinRequest{chat_id, user_id}</code>，忽略 reason。</li>
+<li>S-07 入群事件去重：<code>chat_member</code> 更新里「之前不在群（left / kicked / restricted 且 is_member=false）→ 现在在群」算入群，与 <code>new_chat_members</code> 服务消息走同一个 <code>memberJoin</code>：同一 chat:user 两分钟内只上报一次；机器人（含自己）跳过。</li>
+<li>S-08 治理动作（10s 超时）：<code>deleteMessage{chat_id, message_id}</code>；禁言 <code>restrictChatMember{permissions: 全部 false, until_date}</code>；封禁 <code>banChatMember</code>；解除 = <code>unbanChatMember{only_if_banned:true}</code> 后再 <code>restrictChatMember{permissions: 全部 true}</code> 恢复发言。chat_id / user_id / message_id 非整数直接报错。</li>
+<li>S-09 权限自检：刷新管理员缓存（<code>getChatAdministrators</code>）时找到机器人自己的条目，缺 <code>can_delete_messages</code> / <code>can_restrict_members</code> / <code>can_invite_users</code> 记告警「机器人缺少群管理权限，相关功能不可用」，不在列表里记「机器人不是群管理员：收不到全量群消息，也无法审批入群、删消息、封禁」。</li>
 <li>S-05 发送：<code>sendMessage{chat_id, text, reply_parameters:{message_id, allow_sending_without_reply:true}}</code>，单条超过 4096 字硬切，仅首段引用；每次调用 20s 超时。<code>Format=markdown</code> 时先渲染为 HTML、带 <code>parse_mode:"HTML"</code> 与 <code>link_preview_options:{is_disabled:true}</code> 整条发送；HTML 超过 4096 字，或平台报 <code>can't parse entities</code>，改发纯文本（4.6）。</li>
 </ol>
 <h3>4.4 企业微信（F-08，预留）</h3>
@@ -224,13 +233,13 @@
 <table>
 <thead><tr><th>来源</th><th>message</th></tr></thead>
 <tbody>
-<tr><td>Registry.Send</td><td>渠道 {name} 未启用</td></tr>
+<tr><td>Registry</td><td>渠道 {name} 未启用 / 渠道 {name} 不支持入群审批 / 渠道 {name} 不支持群消息治理</td></tr>
 <tr><td>QQ token</td><td>获取 access_token: {网络错误} / 获取 access_token 失败: code={code} {message}</td></tr>
 <tr><td>QQ API</td><td>QQ API {method} {path}: HTTP {status} code={code} {message}</td></tr>
 <tr><td>QQ 网关</td><td>连接网关: … / 预期 Hello，收到 op={n} / 平台要求重连 / 会话失效（检查 intents 权限是否已在开放平台开通）</td></tr>
 <tr><td>QQ 发送</td><td>QQ 不支持的聊天类型 {type}</td></tr>
 <tr><td>QQ Webhook</td><td>401 invalid signature / 400 bad request / 400 bad payload</td></tr>
-<tr><td>Telegram</td><td>telegram {method}: {error_code} {description} / telegram {method}: HTTP {status} / telegram chat_id 非法</td></tr>
+<tr><td>Telegram</td><td>telegram {method}: {error_code} {description} / telegram {method}: HTTP {status} / telegram chat_id 非法 / telegram user_id 非法 / telegram message_id 非法</td></tr>
 <tr><td>设置校验</td><td>启用 QQ 机器人需要填写 AppID 与 AppSecret / 启用 Telegram 需要填写 Bot Token / QQ 机器人接入方式只支持 websocket / webhook / 企业微信渠道尚未开放，请保持关闭</td></tr>
 </tbody>
 </table>
@@ -249,7 +258,7 @@
 <tr><td>channel.telegram.enabled</td><td>false</td><td></td></tr>
 <tr><td>channel.telegram.botToken</td><td>""</td><td>掩码回显</td></tr>
 <tr><td>channel.telegram.apiBase</td><td>https://api.telegram.org</td><td>可指向自建 Bot API Server / 反代</td></tr>
-<tr><td>channel.telegram.private</td><td>true</td><td>是否响应私聊</td></tr>
+<tr><td>channel.telegram.private</td><td>true</td><td>是否响应私聊（关闭时私聊不进入问答，入群私聊验证不受影响）</td></tr>
 <tr><td>channel.wecom.*</td><td>—</td><td>预留，不可启用</td></tr>
 </tbody>
 </table>

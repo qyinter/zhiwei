@@ -301,6 +301,9 @@ const (
 	PurposeCompact   = "compact"
 	PurposePromote   = "promote"
 	PurposeTopic     = "topic"
+	// PurposeJoinReview 入群审核的模型判定；PurposeModeration 群消息治理的模型判定
+	PurposeJoinReview = "join_review"
+	PurposeModeration = "moderation"
 )
 
 func (s *Store) RecordLLMCall(ctx context.Context, c LLMCall) error {

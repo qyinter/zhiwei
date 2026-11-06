@@ -18,6 +18,7 @@ import type {
   JoinReviewSettings,
   LLMSettings,
   ModelCatalogSettings,
+  ModerationSettings,
   ProactiveSettings,
   QQBotSettings,
   ReflectSettings,
@@ -229,14 +230,19 @@ export function TelegramForm({ value, onChange }: FormProps<TelegramSettings>) {
   const set = (patch: Partial<TelegramSettings>) => onChange({ ...value, ...patch })
   return (
     <div className="grid gap-5">
-      <ToggleRow label="启用 Telegram Bot" hint="在 @BotFather 创建机器人获取 Token；群里需 @机器人 或回复机器人才会触发" checked={value.enabled} onChange={(enabled) => set({ enabled })} />
+      <ToggleRow
+        label="启用 Telegram Bot"
+        hint="在 @BotFather 创建机器人获取 Token；群里需 @机器人 或回复机器人才会触发。把机器人设为群管理员并勾选「删除消息」「封禁用户」「添加成员」，才能收到全量群消息、审批入群、处置广告"
+        checked={value.enabled}
+        onChange={(enabled) => set({ enabled })}
+      />
       <Field label="Bot Token" htmlFor="tg-token">
         <Input id="tg-token" className="font-mono" type="password" autoComplete="off" value={value.botToken} onChange={(e) => set({ botToken: e.target.value })} placeholder="123456:ABC-…" />
       </Field>
       <Field label="API 地址" hint="服务器无法直连 api.telegram.org 时，可填自建 Bot API Server 或反代地址" htmlFor="tg-base">
         <Input id="tg-base" className="font-mono" value={value.apiBase} onChange={(e) => set({ apiBase: e.target.value })} />
       </Field>
-      <ToggleRow label="响应私聊" checked={value.private} onChange={(v) => set({ private: v })} />
+      <ToggleRow label="响应私聊" hint="关闭后私聊不进入问答；入群审核的私聊验证不受影响" checked={value.private} onChange={(v) => set({ private: v })} />
     </div>
   )
 }
@@ -309,19 +315,103 @@ export function JoinReviewForm({ value, onChange }: FormProps<JoinReviewSettings
     <div className="grid gap-5">
       <ToggleRow
         label="开启入群审核"
-        hint="QQ 生效群收到加群申请时，取验证消息 / 入群问题的答案调核对接口：存在则自动同意，不存在则自动拒绝；接口不可用时不处理，留给管理员。机器人需是群管理员，并在开放平台开通群成员事件权限"
+        hint="生效群收到加群申请时自动审核。QQ 取申请时填写的验证消息 / 入群问题答案；Telegram 由机器人私聊申请人发验证问题，拿到回复再判定。机器人需是群管理员（Telegram 还需群开启「入群需审批」）。个别群可在「群管理」里单独开关"
         checked={value.enabled}
         onChange={(enabled) => set({ enabled })}
       />
-      <Field label="核对接口" hint={'调用时追加 ?id=，只认 {"status":"ok"} / {"status":"error"}。'} htmlFor="jr-url">
+      <Field label="核对接口" hint={'调用时追加 ?id=，只认 {"status":"ok"} / {"status":"error"}；接口不可用时留给管理员。留空则由模型按下面的审核标准判断。'} htmlFor="jr-url">
         <Input id="jr-url" className="font-mono" value={value.checkUrl} onChange={(e) => set({ checkUrl: e.target.value })} placeholder="https://example.com/api/member-check" />
       </Field>
       <Field label="ID 提取规则" hint="正则：从答案里取第一个前后不紧贴字母数字的匹配；留空则整段答案作为 ID。缺省 [A-Za-z0-9]{10}（10 位用户 ID）" htmlFor="jr-pattern">
         <Input id="jr-pattern" className="font-mono" value={value.idPattern} onChange={(e) => set({ idPattern: e.target.value })} />
       </Field>
-      <Field label="拒绝理由" hint="QQ 会把这段话展示给被拒绝的申请人。" htmlFor="jr-reason">
+      <Field label="模型审核标准" hint="没填核对接口时生效：写明什么样的申请人可以通过，模型结合申请人昵称、简介与回答判断，拿不准时不通过" htmlFor="jr-criteria">
+        <Textarea id="jr-criteria" rows={3} value={value.criteria} onChange={(e) => set({ criteria: e.target.value })} placeholder="例如：正在使用或打算使用本产品的开发者可以通过；推销、引流、与产品无关的一律不通过。" />
+      </Field>
+      <Field label="私聊验证问题（Telegram）" hint="收到申请后机器人私聊申请人发这段话，对方的回复作为答案" htmlFor="jr-question">
+        <Textarea id="jr-question" rows={2} value={value.question} onChange={(e) => set({ question: e.target.value })} />
+      </Field>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Field label="回复时限（分钟）" hint="申请人超过这么久没回复按下面的方式处理，1~1440">
+          <NumberInput value={value.timeoutMin} onChange={(n) => set({ timeoutMin: n })} />
+        </Field>
+        <Field label="超时处理">
+          <Select value={value.timeoutAction} onValueChange={(v) => set({ timeoutAction: v as JoinReviewSettings["timeoutAction"] })}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="decline">自动拒绝（可重新申请）</SelectItem>
+              <SelectItem value="pending">留给管理员</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      </div>
+      <Field label="拒绝理由" hint="QQ 由平台展示给被拒绝的申请人；Telegram 由机器人私聊告知。" htmlFor="jr-reason">
         <Input id="jr-reason" value={value.rejectReason} onChange={(e) => set({ rejectReason: e.target.value })} />
       </Field>
+    </div>
+  )
+}
+
+export function ModerationForm({ value, onChange }: FormProps<ModerationSettings>) {
+  const set = (patch: Partial<ModerationSettings>) => onChange({ ...value, ...patch })
+  return (
+    <div className="grid gap-5">
+      <ToggleRow
+        label="启用群消息治理（全局）"
+        hint="挡广告：规则层即时处置新成员的链接 / @ / 转发与关键词黑名单，模型层对可疑消息再判一次。群主 / 管理员豁免。需要收到全量群消息并有删除消息、封禁用户权限（Telegram 把机器人设为管理员即可；QQ 官方机器人没有这些接口，只记录不处置）。个别群可在「群管理」里单独开关"
+        checked={value.enabled}
+        onChange={(enabled) => set({ enabled })}
+      />
+      <div className="grid gap-5 sm:grid-cols-3">
+        <Field label="新成员时长（小时）" hint="入群不足这么久算新成员，默认 24；只对机器人见过入群的人生效">
+          <NumberInput value={value.newMemberHours} onChange={(n) => set({ newMemberHours: n })} />
+        </Field>
+        <Field label="处置动作">
+          <Select value={value.action} onValueChange={(v) => set({ action: v as ModerationSettings["action"] })}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="delete">仅删除消息</SelectItem>
+              <SelectItem value="mute">删除并禁言</SelectItem>
+              <SelectItem value="ban">删除并封禁</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="禁言时长（分钟）" hint="处置动作为「删除并禁言」时生效，默认 1440">
+          <NumberInput value={value.muteMin} onChange={(n) => set({ muteMin: n })} />
+        </Field>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <ToggleRow label="新成员发链接" checked={value.newMemberLinks} onChange={(v) => set({ newMemberLinks: v })} />
+        <ToggleRow label="新成员 @ 其他用户" checked={value.newMemberMentions} onChange={(v) => set({ newMemberMentions: v })} />
+        <ToggleRow label="新成员转发消息" checked={value.newMemberForwards} onChange={(v) => set({ newMemberForwards: v })} />
+        <ToggleRow label="新成员发图片" hint="默认关闭：客户发截图提问很常见" checked={value.newMemberMedia} onChange={(v) => set({ newMemberMedia: v })} />
+      </div>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Field label="关键词黑名单" hint="每行一条，任何人命中即处置（不区分大小写的包含匹配）">
+          <LinesInput value={value.keywords} onChange={(keywords) => set({ keywords })} />
+        </Field>
+        <Field label="放行域名" hint="每行一个域名（含子域），指向这些域名的链接不算链接，例如你们自己的官网 / 文档站">
+          <LinesInput value={value.allowDomains} onChange={(allowDomains) => set({ allowDomains })} />
+        </Field>
+      </div>
+      <ToggleRow
+        label="模型层判定"
+        hint="规则没命中但可疑的消息（新成员、带链接 / @ / 转发、带联系方式话术）交给模型判一次；每条可疑消息一次小模型调用，用量页按「群消息治理」统计"
+        checked={value.llm}
+        onChange={(v) => set({ llm: v })}
+      />
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Field label="处置所需置信度" hint="0~1，默认 0.8；模型给出的置信度不足时只记录不处置">
+          <NumberInput value={value.llmMinConfidence} step="0.05" onChange={(n) => set({ llmMinConfidence: n })} />
+        </Field>
+        <Field label="累计升级封禁" hint="7 天内被处置达到这么多次改为封禁；0 不升级，默认 2">
+          <NumberInput value={value.banAfter} onChange={(n) => set({ banAfter: n })} />
+        </Field>
+      </div>
     </div>
   )
 }

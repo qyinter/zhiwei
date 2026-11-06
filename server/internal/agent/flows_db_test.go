@@ -58,14 +58,48 @@ func (f *fakeLLM) count(substr string) int {
 	return n
 }
 
-// fakeAdapter 记录发出的消息与入群审批。
+// fakeAdapter 记录发出的消息、入群审批与治理动作。name 为空时冒充 QQ。
 type fakeAdapter struct {
 	mu      sync.Mutex
+	name    string
 	sent    []channel.Outbound
 	reviews []bool
+	// actions 治理调用轨迹：delete:msg / mute:user / ban:user / unrestrict:user
+	actions []string
 }
 
-func (a *fakeAdapter) Name() string                                 { return channel.QQBot }
+func (a *fakeAdapter) Name() string {
+	if a.name != "" {
+		return a.name
+	}
+	return channel.QQBot
+}
+func (a *fakeAdapter) record(s string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.actions = append(a.actions, s)
+}
+func (a *fakeAdapter) DeleteMessage(_ context.Context, _, id string) error {
+	a.record("delete:" + id)
+	return nil
+}
+func (a *fakeAdapter) MuteMember(_ context.Context, _, u string, _ time.Time) error {
+	a.record("mute:" + u)
+	return nil
+}
+func (a *fakeAdapter) BanMember(_ context.Context, _, u string) error {
+	a.record("ban:" + u)
+	return nil
+}
+func (a *fakeAdapter) Unrestrict(_ context.Context, _, u string) error {
+	a.record("unrestrict:" + u)
+	return nil
+}
+func (a *fakeAdapter) acts() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.actions...)
+}
 func (a *fakeAdapter) Start(context.Context, channel.Handler) error { return nil }
 func (a *fakeAdapter) Stop()                                        {}
 func (a *fakeAdapter) Status() channel.Status                       { return channel.Status{} }
@@ -98,6 +132,19 @@ type harness struct {
 	llm *fakeLLM
 	ad  *fakeAdapter
 	cfg settings.All
+}
+
+// waitUntil 等后台 goroutine 把结果落下来（最多 5 秒），超时时报出等的是什么。
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待超时：%s", what)
 }
 
 func newHarness(t *testing.T, reply func(llm.Request) string) *harness {
@@ -456,4 +503,203 @@ func waitFor(t *testing.T, ok func() bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("等待超时")
+}
+
+func TestJoinVerifyFlow(t *testing.T) {
+	// TG 式入群审核：申请不带答案 → 私聊问 → 回复后模型按审核标准判定
+	h := newHarness(t, func(req llm.Request) string {
+		if strings.Contains(req.System, "入群审核员") {
+			if strings.Contains(req.Messages[0].Content, "看文档") {
+				return `{"approve": true, "reason": "说明了合理用途"}`
+			}
+			return `{"approve": false, "reason": "与本群无关"}`
+		}
+		return "{}"
+	})
+	ctx := context.Background()
+	h.ad.name = channel.Telegram
+	h.o.reg.Replace(ctx, []channel.Adapter{h.ad}, nil)
+	cfg := h.cfg
+	cfg.JoinReview = settings.JoinReview{Enabled: true, Criteria: "使用本产品的开发者可以通过", Question: "你申请入群的原因？", TimeoutMin: 30, TimeoutAction: "decline", RejectReason: "不符合入群条件"}
+	h.o.cfg = cfg
+
+	req := channel.Inbound{Kind: channel.KindJoinRequest, Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", ChatTitle: "用户群",
+		SenderID: "7", SenderName: "小七", JoinRequest: &channel.JoinRequest{Answer: "developer", NeedsAnswer: true}}
+	h.o.reviewJoin(cfg, req)
+	list, _, _ := h.st.ListJoinRequests(ctx, 1, 20)
+	if len(list) != 1 || list[0].Decision != store.JoinAwaiting || list[0].Answer != "developer" {
+		t.Fatalf("awaiting record = %+v", list)
+	}
+	if texts := h.ad.texts(); len(texts) != 1 || texts[0] != "你申请入群的原因？" || h.ad.sent[0].ChatType != channel.ChatPrivate || h.ad.sent[0].ChatID != "7" {
+		t.Fatalf("question dm = %+v", h.ad.sent)
+	}
+	// 无关的人私聊不受影响；申请人发空消息被要求用文字回复；申请人回答后判定通过
+	if h.o.answerJoin(ctx, cfg, channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatPrivate, ChatID: "8", SenderID: "8", Text: "hi"}) {
+		t.Fatal("stranger's dm must not be treated as join answer")
+	}
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatPrivate, ChatID: "7", SenderID: "7", Images: make([]channel.Image, 1)})
+	if texts := h.ad.texts(); len(texts) != 2 || texts[1] != joinNeedTextAnswer {
+		t.Fatalf("empty answer reply = %v", texts)
+	}
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatPrivate, ChatID: "7", SenderID: "7", Text: "想看文档问问题", Mentioned: false})
+	waitUntil(t, "审批完成", func() bool { h.ad.mu.Lock(); defer h.ad.mu.Unlock(); return len(h.ad.reviews) == 1 })
+	if !h.ad.reviews[0] {
+		t.Fatal("should approve")
+	}
+	waitUntil(t, "记录回写", func() bool {
+		list, _, _ = h.st.ListJoinRequests(ctx, 1, 20)
+		return len(list) == 1 && list[0].Decision == store.JoinApproved
+	})
+	if list[0].Answer != "想看文档问问题" || !strings.HasPrefix(list[0].Detail, "模型判定：") {
+		t.Fatalf("approved record = %+v", list[0])
+	}
+	waitUntil(t, "结果私聊", func() bool { return len(h.ad.texts()) == 3 })
+	if texts := h.ad.texts(); texts[2] != "验证通过，已同意你加入「用户群」。" {
+		t.Fatalf("approved dm = %v", texts)
+	}
+	if _, ok, _ := h.st.PeekJoinPending(ctx, channel.Telegram, "7"); ok {
+		t.Fatal("pending must be consumed")
+	}
+	// 没有待回答申请时，这条私聊应当进入正常问答（这里渠道关了响应私聊 → 直接丢弃，不报错）
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatPrivate, ChatID: "7", SenderID: "7", Text: "再发一条"})
+
+	// 超时：自动拒绝并私聊告知
+	req.SenderID, req.SenderName = "9", "小九"
+	h.o.reviewJoin(cfg, req)
+	w, ok, _ := h.st.PeekJoinPending(ctx, channel.Telegram, "9")
+	if !ok {
+		t.Fatal("pending expected")
+	}
+	h.o.expireJoin(ctx, cfg, w)
+	list, _, _ = h.st.ListJoinRequests(ctx, 1, 20)
+	if len(list) != 2 || list[0].UserID != "9" || list[0].Decision != store.JoinDeclined || list[0].Detail != "超时未回复，自动拒绝" {
+		t.Fatalf("expired record = %+v", list[0])
+	}
+	if len(h.ad.reviews) != 2 || h.ad.reviews[1] {
+		t.Fatalf("reviews = %v", h.ad.reviews)
+	}
+	if texts := h.ad.texts(); texts[len(texts)-1] != joinExpiredDeclineText {
+		t.Fatalf("expired dm = %v", texts)
+	}
+	// 回复与超时只有一方处理：待回答记录已摘掉，再超时一次是空操作
+	h.o.expireJoin(ctx, cfg, w)
+	if len(h.ad.reviews) != 2 {
+		t.Fatal("expire twice must not review twice")
+	}
+	// 模型调用记了用途
+	if n := h.llm.count("入群审核员"); n != 1 {
+		t.Fatalf("judge calls = %d", n)
+	}
+}
+
+func TestModerationFlow(t *testing.T) {
+	h := newHarness(t, func(req llm.Request) string {
+		if strings.Contains(req.System, "广告识别员") {
+			switch {
+			case strings.Contains(req.Messages[0].Content, "加我微信"):
+				return `{"spam": true, "confidence": 0.95, "reason": "引流加微信"}`
+			case strings.Contains(req.Messages[0].Content, "可能是广告"):
+				return `{"spam": true, "confidence": 0.5, "reason": "拿不准"}`
+			}
+			return `{"spam": false, "confidence": 0.9, "reason": "正常提问"}`
+		}
+		return "{}"
+	})
+	ctx := context.Background()
+	h.ad.name = channel.Telegram
+	h.o.reg.Replace(ctx, []channel.Adapter{h.ad}, nil)
+	cfg := h.cfg
+	cfg.Moderation.Enabled = true
+	cfg.Moderation.BanAfter = 2
+	h.o.cfg = cfg
+
+	// 新成员入群后发链接：规则层同步命中，不进时间线，后台删消息 + 禁言
+	h.o.Handle(channel.Inbound{Kind: channel.KindMemberJoin, Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", SenderID: "7", SenderName: "小七"})
+	msg := channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", ChatTitle: "用户群", MessageID: "m1",
+		SenderID: "7", SenderName: "小七", SenderRole: channel.RoleMember, Text: "低价代充 https://spam.io", Links: []string{"https://spam.io"}}
+	h.o.Handle(msg)
+	waitUntil(t, "规则处置", func() bool { return len(h.ad.acts()) == 2 })
+	if acts := h.ad.acts(); acts[0] != "delete:m1" || acts[1] != "mute:7" {
+		t.Fatalf("acts = %v", acts)
+	}
+	if chats, _ := h.st.GroupChats(ctx); len(chats) != 0 {
+		t.Fatal("spam must not enter the timeline")
+	}
+	var list []store.ModerationAction
+	waitUntil(t, "处置记录", func() bool {
+		list, _, _ = h.st.ListModerationActions(ctx, 1, 20)
+		return len(list) == 1 && list[0].Action == store.ModActionMute
+	})
+	if list[0].Source != store.ModSourceRule || list[0].Reason != "新成员发送链接" || list[0].Detail != "" || list[0].Content != "低价代充 https://spam.io" {
+		t.Fatalf("record = %+v", list[0])
+	}
+	// 管理员发同样的内容：豁免
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", MessageID: "m2", SenderID: "A1", SenderRole: channel.RoleAdmin, Text: "https://spam.io", Links: []string{"https://spam.io"}})
+	if chats, _ := h.st.GroupChats(ctx); len(chats) != 1 {
+		t.Fatal("admin message must be buffered")
+	}
+	// 第二次命中：7 天内累计 2 次 → 升级封禁
+	msg.MessageID = "m3"
+	h.o.Handle(msg)
+	waitUntil(t, "升级封禁", func() bool { acts := h.ad.acts(); return len(acts) == 4 && acts[3] == "ban:7" })
+	list, _, _ = h.st.ListModerationActions(ctx, 1, 20)
+	if list[0].Action != store.ModActionBan || !strings.Contains(list[0].Reason, "升级封禁") {
+		t.Fatalf("escalated = %+v", list[0])
+	}
+
+	// 老成员带联系方式：规则层放行、进时间线，模型层判定为广告后删消息并从时间线移除
+	old := channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", MessageID: "m4", SenderID: "8", SenderName: "老八", SenderRole: channel.RoleMember, Text: "想要的加我微信 abc123"}
+	h.o.Handle(old)
+	waitUntil(t, "模型处置", func() bool { return len(h.ad.acts()) == 6 })
+	if acts := h.ad.acts(); acts[4] != "delete:m4" || acts[5] != "mute:8" {
+		t.Fatalf("llm acts = %v", acts)
+	}
+	waitUntil(t, "时间线清理", func() bool {
+		rows, _ := h.st.Pool().Query(ctx, `SELECT platform_msg_id FROM group_messages WHERE chat_id = '-100'`)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			_ = rows.Scan(&id)
+			ids = append(ids, id)
+		}
+		return len(ids) == 1 && ids[0] == "m2"
+	})
+	// 置信度不足：只记录
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", MessageID: "m5", SenderID: "8", SenderRole: channel.RoleMember, Text: "可能是广告 @someone", MentionsUser: true})
+	waitUntil(t, "仅记录", func() bool {
+		list, _, _ = h.st.ListModerationActions(ctx, 1, 20)
+		return len(list) == 4 && list[0].Action == store.ModActionNone
+	})
+	if list[0].Detail != "置信度不足，仅记录" || len(h.ad.acts()) != 6 {
+		t.Fatalf("low confidence = %+v acts=%v", list[0], h.ad.acts())
+	}
+	// 普通提问不送模型（没有可疑特征）
+	before := h.llm.count("广告识别员")
+	h.o.Handle(channel.Inbound{Channel: channel.Telegram, ChatType: channel.ChatGroup, ChatID: "-100", MessageID: "m6", SenderID: "8", SenderRole: channel.RoleMember, Text: "请问怎么充值"})
+	time.Sleep(100 * time.Millisecond)
+	if h.llm.count("广告识别员") != before {
+		t.Fatal("plain question must not call the model")
+	}
+
+	// 误判恢复：解除限制并标记；再恢复一次报错
+	muted := list[3] // 最早一条（规则禁言）
+	if err := h.o.RevertModeration(ctx, muted.ID); err != nil {
+		t.Fatal(err)
+	}
+	if acts := h.ad.acts(); acts[len(acts)-1] != "unrestrict:7" {
+		t.Fatalf("revert acts = %v", acts)
+	}
+	if err := h.o.RevertModeration(ctx, muted.ID); err != ErrModerationReverted {
+		t.Fatalf("second revert = %v", err)
+	}
+	// 关闭治理后不再处置
+	cfg.Moderation.Enabled = false
+	h.o.cfg = cfg
+	msg.MessageID = "m7"
+	h.o.Handle(msg)
+	time.Sleep(100 * time.Millisecond)
+	if len(h.ad.acts()) != 7 {
+		t.Fatalf("disabled moderation acted: %v", h.ad.acts())
+	}
 }

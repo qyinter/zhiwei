@@ -12,6 +12,7 @@ import {
   EmbeddingForm,
   ModelCatalogForm,
   JoinReviewForm,
+  ModerationForm,
   LLMForm,
   ProactiveForm,
   QQBotForm,
@@ -149,8 +150,12 @@ export default function SettingsPage() {
                     <WelcomeForm value={cfg.welcome} onChange={(welcome) => setCfg({ ...cfg, welcome })} brand={cfg.brand.name} />
                   </section>
                   <section className="grid gap-4">
-                    <Kicker>入群审核（QQ）</Kicker>
+                    <Kicker>入群审核</Kicker>
                     <JoinReviewForm value={cfg.joinReview} onChange={(joinReview) => setCfg({ ...cfg, joinReview })} />
+                  </section>
+                  <section className="grid gap-4">
+                    <Kicker>群消息治理</Kicker>
+                    <ModerationForm value={cfg.moderation} onChange={(moderation) => setCfg({ ...cfg, moderation })} />
                   </section>
                 </div>
               )}

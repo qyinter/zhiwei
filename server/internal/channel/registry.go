@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Registry 持有当前生效的适配器集合。设置变更时 runtime 整体 Replace：
@@ -72,6 +73,51 @@ func (r *Registry) ReviewJoin(ctx context.Context, channel, chatID, userID strin
 		return fmt.Errorf("渠道 %s 不支持入群审批", channel)
 	}
 	return jr.ReviewJoin(ctx, chatID, userID, req, approve, reason)
+}
+
+// moderator 取支持治理的适配器；渠道未启用或不支持返回错误。
+func (r *Registry) moderator(channel string) (Moderator, error) {
+	a, ok := r.Get(channel)
+	if !ok {
+		return nil, fmt.Errorf("渠道 %s 未启用", channel)
+	}
+	m, ok := a.(Moderator)
+	if !ok {
+		return nil, fmt.Errorf("渠道 %s 不支持群消息治理", channel)
+	}
+	return m, nil
+}
+
+func (r *Registry) DeleteMessage(ctx context.Context, channel, chatID, messageID string) error {
+	m, err := r.moderator(channel)
+	if err != nil {
+		return err
+	}
+	return m.DeleteMessage(ctx, chatID, messageID)
+}
+
+func (r *Registry) MuteMember(ctx context.Context, channel, chatID, userID string, until time.Time) error {
+	m, err := r.moderator(channel)
+	if err != nil {
+		return err
+	}
+	return m.MuteMember(ctx, chatID, userID, until)
+}
+
+func (r *Registry) BanMember(ctx context.Context, channel, chatID, userID string) error {
+	m, err := r.moderator(channel)
+	if err != nil {
+		return err
+	}
+	return m.BanMember(ctx, chatID, userID)
+}
+
+func (r *Registry) Unrestrict(ctx context.Context, channel, chatID, userID string) error {
+	m, err := r.moderator(channel)
+	if err != nil {
+		return err
+	}
+	return m.Unrestrict(ctx, chatID, userID)
 }
 
 // GroupName 查群名；渠道未启用或不支持返回空串。

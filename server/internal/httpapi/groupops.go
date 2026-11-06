@@ -119,6 +119,40 @@ func (s *Server) listJoinRequests(c *gin.Context) {
 	paged(c, list, total, p)
 }
 
+// ── 群消息治理 ──
+
+func (s *Server) listModeration(c *gin.Context) {
+	p := page(c)
+	list, total, err := s.st.ListModerationActions(c, p, pageSize)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	cfg := s.rt.Settings.Get()
+	c.JSON(http.StatusOK, gin.H{
+		"list": list, "total": total, "page": p, "pageSize": pageSize,
+		"config": cfg.Moderation, "anyEnabled": cfg.AnyModeration(),
+	})
+}
+
+func (s *Server) revertModeration(c *gin.Context) {
+	id, ok := idParam(c)
+	if !ok {
+		return
+	}
+	err := s.rt.Agent.RevertModeration(c, id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		storeErr(c, err)
+	case errors.Is(err, agent.ErrModerationReverted):
+		fail(c, http.StatusConflict, err.Error())
+	case err != nil:
+		fail(c, http.StatusBadGateway, err.Error())
+	default:
+		c.Status(http.StatusNoContent)
+	}
+}
+
 // ── 反思沉淀 ──
 
 func (s *Server) getReflection(c *gin.Context) {

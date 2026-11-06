@@ -32,6 +32,7 @@
 <tr><td>0.5</td><td>2026-10-24</td><td>后台导航「配置」组新增「技能」（知识库之后），页面见 FA-DD-010 4.5</td></tr>
 <tr><td>0.6</td><td>2026-10-24</td><td>新增设置分区 modelCatalog 与「模型目录」标签（含测试连接与示例报价）；技能页内置工具 model_catalog 可直接启停</td></tr>
 <tr><td>0.7</td><td>2026-10-25</td><td>新增「用量统计」（4.7）、「运行日志」（4.8）页；导航运营组加「问题排行」「用量统计」、群运营组加「群管理」（FA-DD-008）；总览「今日」改按浏览器时区；体验台可上传 / 粘贴图片，会话抽屉显示客户图片；设置分区新增 topics / groups，客服策略新增「识别图片」；系统设置保存时不回写 groups；保存设置前克隆切片，校验失败不会改脏当前设置</td></tr>
+<tr><td>0.8</td><td>2026-11-05</td><td>设置分区新增 moderation（群运营标签加「群消息治理」表单，入群审核表单加模型审核标准 / 私聊验证问题 / 回复时限）；群运营组加「消息治理」页（FA-DD-008 4.8）；用量统计用途标签加「入群审核」「群消息治理」</td></tr>
 </tbody>
 </table>
 <hr>
@@ -97,7 +98,7 @@
 <h3>4.3 密钥掩码</h3>
 <p>掩码字段：<code>llm.apiKey</code>、<code>qqbot.appSecret</code>、<code>telegram.botToken</code>、<code>wecom.secret</code>、<code>wecom.encodingAesKey</code>、<code>embedding.apiKey</code>。规则：空 → 空；≤4 字符 → <code>••••</code>；否则 <code>••••</code> + 后 4 位。回写时只要包含 <code>••••</code> 即视为未修改。</p>
 <h3>4.4 设置页结构</h3>
-<p>分段标签：大模型（预设按钮 + 测试连接）/ 客服策略 / 向量检索（测试连接：返回耗时、维数与两组示例相似度）/ 群运营（主动回复、问题排行、入群欢迎、入群审核）/ 反思沉淀 / 品牌 / QQ 机器人 / Telegram / 企业微信（预留说明）/ 账号（改密）。表单组件与初始化向导共用（<code>settings-forms.tsx</code>），一处修改两处生效。页头一个主按钮「保存设置」（设计系统：一屏一个主按钮）。</p>
+<p>分段标签：大模型（预设按钮 + 测试连接）/ 客服策略 / 向量检索（测试连接：返回耗时、维数与两组示例相似度）/ 群运营（主动回复、问题排行、入群欢迎、入群审核、群消息治理）/ 反思沉淀 / 品牌 / QQ 机器人 / Telegram / 企业微信（预留说明）/ 账号（改密）。表单组件与初始化向导共用（<code>settings-forms.tsx</code>），一处修改两处生效。页头一个主按钮「保存设置」（设计系统：一屏一个主按钮）。</p>
 <h3>4.5 体验台前端（F-06）</h3>
 <p>左侧对话（Enter 发送、Shift+Enter 换行、输入法组合中不触发），右侧「本轮详情」：模型、耗时、输入 / 输出 / 缓存命中 token、转人工提示、预检索命中（带分数）、工具调用（可展开结果）。「新对话」清空界面并让下一条以 <code>reset=true</code> 发送。输入框左侧可选图片，也可直接粘贴截图（最多 4 张、单张 10MB，前端读成 data URL 随请求发送）；回复下方标出「看了 N 张图」，上游拒收图片时标「模型拒收图片，已去图重试」。</p>
 <p>会话抽屉：客户消息带图片且图片未过期时，显示缩略图（点开看缩放后的原图），正文里的「[图片]」占位不再重复；图片 30 天后清理，占位留着说明发过图。</p>
@@ -141,7 +142,7 @@
 <tr><td>llm</td><td>settings.LLM</td><td>FA-DD-004 第 7 章</td></tr>
 <tr><td>agent</td><td>settings.Agent</td><td>FA-DD-004 / FA-DD-006 第 7 章</td></tr>
 <tr><td>channel.qqbot / channel.telegram / channel.wecom</td><td>settings.QQBot / Telegram / WeCom</td><td>FA-DD-003 第 7 章</td></tr>
-<tr><td>proactive / welcome / joinReview</td><td>settings.Proactive / Welcome / JoinReview</td><td>FA-DD-008 第 7 章</td></tr>
+<tr><td>proactive / welcome / joinReview / moderation</td><td>settings.Proactive / Welcome / JoinReview / Moderation</td><td>FA-DD-008 第 7 章</td></tr>
 <tr><td>reflect</td><td>settings.Reflect</td><td>FA-DD-009 第 7 章</td></tr>
 <tr><td>embedding</td><td>settings.Embedding（apiKey 掩码）</td><td>FA-DD-005 第 7 章</td></tr>
 <tr><td>modelCatalog</td><td>settings.ModelCatalog</td><td>FA-DD-004 第 7 章</td></tr>

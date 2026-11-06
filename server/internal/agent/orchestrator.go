@@ -154,6 +154,10 @@ func (o *Orchestrator) Handle(in channel.Inbound) {
 
 	switch in.Kind {
 	case channel.KindMemberJoin:
+		// 入群时间给群消息治理判断「新人」用
+		if err := o.st.TouchGroupMember(ctx, in.Channel, in.ChatID, in.SenderID, in.SenderName, time.Now()); err != nil {
+			o.log.Warn("记录入群时间失败", "err", err)
+		}
 		o.welcome(ctx, cfg, in)
 		return
 	case channel.KindJoinRequest:
@@ -162,8 +166,21 @@ func (o *Orchestrator) Handle(in channel.Inbound) {
 		return
 	}
 
-	// 群消息一律进群时间线（主动回复 / 反思沉淀的素材），之后只有 @ 机器人的才进入问答流程
+	// 私聊：有待回答的入群申请时这条就是验证答案；渠道关了「响应私聊」（Mentioned=false）的其余私聊丢弃
+	if in.ChatType == channel.ChatPrivate {
+		if o.answerJoin(ctx, cfg, in) {
+			return
+		}
+		if !in.Mentioned {
+			return
+		}
+	}
+
+	// 群消息先过治理（规则层命中即丢弃），再一律进群时间线（主动回复 / 反思沉淀的素材），之后只有 @ 机器人的才进入问答流程
 	if group {
+		if o.moderate(ctx, cfg, in) {
+			return
+		}
 		o.bufferGroupMessage(ctx, in)
 		if !in.Mentioned {
 			return

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 )
 
 // 渠道标识，也是 conversations.channel 列的取值。
@@ -54,7 +55,8 @@ type Inbound struct {
 	SenderRole string
 	// Text 已剥掉 @机器人 的正文
 	Text string
-	// Mentioned 是否 @了机器人 / 回复了机器人；私聊恒为 true
+	// Mentioned 是否 @了机器人 / 回复了机器人；私聊在渠道开启「响应私聊」时恒为 true，
+	// 关闭时为 false（此时私聊消息只用于入群验证等系统流程，不进入问答）
 	Mentioned bool
 	// Quoted 用户引用的那条消息文本（有就带上，给模型补上下文）
 	Quoted string
@@ -64,6 +66,14 @@ type Inbound struct {
 	ReplyCtx map[string]string
 	// JoinRequest Kind=KindJoinRequest 时有值
 	JoinRequest *JoinRequest
+
+	// 以下为群消息治理用的消息特征（平台不提供时为零值）
+	// Links 消息里的链接（含文字链接的目标地址）
+	Links []string
+	// MentionsUser 是否 @ 了机器人以外的用户
+	MentionsUser bool
+	// ForwardFrom 转发来源类型（TG：user / hidden_user / chat / channel），非转发为空
+	ForwardFrom string
 }
 
 // MaxImages 一条消息最多取几张图片（多的忽略）。
@@ -84,6 +94,8 @@ type JoinRequest struct {
 	Answer    string
 	// AutoApproved 平台侧策略已自动通过（只是通知，不需要再审批）
 	AutoApproved bool
+	// NeedsAnswer 申请事件不带验证答案（TG 只有 bio），需要机器人私聊申请人索取后再审核
+	NeedsAnswer bool
 }
 
 // Outbound 发给某个聊天的一条文本。
@@ -135,9 +147,21 @@ type Adapter interface {
 	Status() Status
 }
 
-// JoinReviewer 支持审批入群申请的适配器（QQ 官方机器人需是群管理员）。
+// JoinReviewer 支持审批入群申请的适配器（机器人需是群管理员）。
+// reason 为拒绝理由：QQ 由平台展示给申请人；TG 的审批接口不带理由，由编排器私聊告知，适配器忽略。
 type JoinReviewer interface {
 	ReviewJoin(ctx context.Context, chatID, userID string, req JoinRequest, approve bool, reason string) error
+}
+
+// Moderator 支持群消息治理的适配器（删消息 / 禁言 / 封禁；机器人需是群管理员并有相应权限）。
+// QQ 官方机器人没有这些接口，不实现；编排器对不支持的渠道只记录不执行。
+type Moderator interface {
+	DeleteMessage(ctx context.Context, chatID, messageID string) error
+	// MuteMember 禁言到 until
+	MuteMember(ctx context.Context, chatID, userID string, until time.Time) error
+	BanMember(ctx context.Context, chatID, userID string) error
+	// Unrestrict 解除封禁与禁言（误判恢复）
+	Unrestrict(ctx context.Context, chatID, userID string) error
 }
 
 // GroupNamer 能按群 ID 查群名的适配器（QQ 官方机器人：群事件只带 openid，群名要另调接口）。查不到返回空串。

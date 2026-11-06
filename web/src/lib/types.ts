@@ -45,6 +45,28 @@ export interface JoinReviewSettings {
   checkUrl: string
   rejectReason: string
   idPattern: string
+  /** TG 私聊申请人的验证问题 */
+  question: string
+  /** 核对接口为空时交给模型按这段标准判断 */
+  criteria: string
+  timeoutMin: number
+  timeoutAction: "decline" | "pending"
+}
+
+export interface ModerationSettings {
+  enabled: boolean
+  newMemberHours: number
+  newMemberLinks: boolean
+  newMemberMentions: boolean
+  newMemberForwards: boolean
+  newMemberMedia: boolean
+  keywords: string[]
+  allowDomains: string[]
+  llm: boolean
+  llmMinConfidence: number
+  action: "delete" | "mute" | "ban"
+  muteMin: number
+  banAfter: number
 }
 
 export interface ProactiveSettings {
@@ -98,6 +120,7 @@ export interface GroupPolicy {
   joinReview: boolean | null
   reflect: boolean | null
   topics: boolean | null
+  moderation: boolean | null
 }
 
 export interface QQBotSettings {
@@ -146,6 +169,7 @@ export interface AllSettings {
   modelCatalog: ModelCatalogSettings
   topics: TopicsSettings
   groups: { policies: GroupPolicy[] }
+  moderation: ModerationSettings
 }
 
 export interface ChannelStatus {
@@ -352,9 +376,39 @@ export interface JoinRequestRecord {
   userName: string
   answer: string
   extractedId: string
-  decision: "approved" | "declined" | "pending" | "auto" | "failed"
+  decision: "approved" | "declined" | "pending" | "auto" | "failed" | "awaiting"
   detail: string
   createdAt: string
+  updatedAt: string
+}
+
+// ── 群消息治理 ──
+
+export interface ModerationAction {
+  id: number
+  channel: string
+  chatId: string
+  chatTitle: string
+  userId: string
+  userName: string
+  messageId: string
+  content: string
+  source: "rule" | "llm"
+  reason: string
+  confidence: number
+  action: "none" | "delete" | "mute" | "ban"
+  detail: string
+  revertedAt: string | null
+  createdAt: string
+}
+
+export interface ModerationData {
+  list: ModerationAction[]
+  total: number
+  page: number
+  pageSize: number
+  config: ModerationSettings
+  anyEnabled: boolean
 }
 
 export interface Reflection {
@@ -435,6 +489,8 @@ export const PURPOSE_LABEL: Record<string, string> = {
   compact: "反思整理",
   promote: "升格评审",
   topic: "问题归类",
+  join_review: "入群审核",
+  moderation: "群消息治理",
 }
 
 /** 浏览器所在时区：统计按它切日（库的时区通常是 UTC） */
@@ -497,6 +553,7 @@ export interface GroupEffective {
   joinReview: boolean
   reflect: boolean
   topics: boolean
+  moderation: boolean
 }
 
 export interface GroupRow {
